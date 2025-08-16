@@ -80,3 +80,10 @@ To deploy to Azure:
 - **Authentication**: Set to anonymous for local development
 - **Route**: `/api/HttpExample`
 - **Storage**: Uses development storage for local development
+
+
+## Git Rules
+Create a new branch: ```git checkout -b <name>```
+Write code :)
+Comit and make PR
+Get approved, merge + delete branch
