@@ -85,5 +85,8 @@ To deploy to Azure:
 ## Git Rules
 Create a new branch: ```git checkout -b <name>```
 Write code :)
-Comit and make PR
-Get approved, merge + delete branch
+Stage Changes, Commit and publish branch on cursor.
+On Github UI make PR.
+Get approved, merge + delete branch.
+
+In general keep PRs as small as feasible. Minimize commit and branch complexity for everyone's sake.
