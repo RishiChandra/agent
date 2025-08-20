@@ -5,6 +5,7 @@ import os, asyncio, json, base64, signal
 import numpy as np
 import sounddevice as sd
 import websockets
+from collections import deque
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,14 +20,21 @@ WS_URL = (
     f"?key={API_KEY}"
 )
 # A native-audio dialog model; adjust if needed
-MODEL = "models/gemini-2.5-flash-preview-native-audio-dialog"
+MODEL = "models/gemini-2.0-flash-live-001"
+# models/gemini-2.0-flash-live-001
+# models/gemini-2.5-flash-preview-native-audio-dialog
+tools = [{'google_search': {}}]
 
+# # gemini-2.5-flash-exp-native-audio-thinking-dialog
 VOICE = "Aoede"      # try "Kore", "Puck", …
 INPUT_SR  = 16000    # mic capture rate (PCM16 mono)
 OUTPUT_SR = 24000    # Gemini audio out rate (PCM16 mono)
 FRAME_MS  = 50       # ~50ms blocks
 IN_BLOCK  = int(INPUT_SR  * FRAME_MS / 1000)
 OUT_BLOCK = int(OUTPUT_SR * FRAME_MS / 1000)
+
+# Simple buffer to smooth out stuttering without adding latency
+AUDIO_BUFFER_SIZE = 2  # Small buffer to smooth playback
 
 # ===== Helpers =====
 def pcm16_b64_from_float32(x: np.ndarray) -> str:
@@ -42,6 +50,7 @@ def make_setup():
     return {
         "setup": {
             "model": MODEL,
+            "tools": tools,
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
                 "speechConfig": {
@@ -52,7 +61,7 @@ def make_setup():
             "inputAudioTranscription": {},
             "outputAudioTranscription": {},
             "systemInstruction": {
-                "parts": [{"text": "You are a helpful assistant. Be concise and respond naturally in conversation."}]
+                "parts": [{"text": "You are a helpful assistant. Be concise and respond naturally in conversation. Only respond in complete sentences. Your speech is limited to 10 seconds."}]
             },
         }
     }
@@ -150,13 +159,23 @@ async def run():
                                             blocksize=OUT_BLOCK, dtype="int16") as spk:
                         print("🔊 Speaker active")
                         audio_count = 0
+                        audio_buffer = deque(maxlen=AUDIO_BUFFER_SIZE)
+                        
                         while not stop.is_set():
                             try:
                                 data = await asyncio.wait_for(spk_q.get(), timeout=0.1)
                                 if data and len(data) > 0:
+                                    audio_buffer.append(data)
                                     audio_count += 1
-                                    print(f"🔊 Playing audio frame #{audio_count}, {len(data)} bytes")
-                                    spk.write(data)
+                                    
+                                    # Play immediately if buffer is ready, otherwise keep buffering
+                                    if len(audio_buffer) >= AUDIO_BUFFER_SIZE:
+                                        # Play the oldest frame and remove it
+                                        frame_to_play = audio_buffer.popleft()
+                                        spk.write(frame_to_play)
+                                        print(f"🔊 Playing audio frame #{audio_count}, {len(frame_to_play)} bytes, buffer: {len(audio_buffer)}")
+                                    else:
+                                        print(f"⏳ Buffering audio frame #{audio_count}, buffer: {len(audio_buffer)}/{AUDIO_BUFFER_SIZE}")
                                 else:
                                     print("⚠️ Empty audio data received")
                             except asyncio.TimeoutError:
@@ -177,7 +196,7 @@ async def run():
                             continue
 
                         # Debug: print the message structure
-                        print(f"Received message: {json.dumps(msg, indent=2)}")
+                     #   print(f"Received message: {json.dumps(msg, indent=2)}")
 
                         server = msg.get("serverContent")
                         if not server:
@@ -196,7 +215,7 @@ async def run():
                         # Audio frames - check multiple possible locations
                         mt = server.get("modelTurn")
                         if mt:
-                            print(f"Model turn received: {json.dumps(mt, indent=2)}")
+                        #    print(f"Model turn received: {json.dumps(mt, indent=2)}")
                             for part in mt.get("parts", []):
                                 inline = part.get("inlineData")
                                 if inline and "data" in inline:
