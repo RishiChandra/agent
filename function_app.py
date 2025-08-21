@@ -3,13 +3,41 @@ import logging
 import json
 from datetime import datetime
 from general_agent.general_agent import call_openai
+from pub_sub_agent.pub_sub_agent import handle_audio_message
 
 app = func.FunctionApp()
 
-@app.function_name(name="HttpExample")
-@app.route(route="HttpExample")
-def http_example(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Python HTTP trigger function processed a request.')
+
+@app.function_name(name="AudioMessageProcessor")
+@app.web_pub_sub_trigger(
+    arg_name="req",
+    hub="web-pub-sub-ai-pin",
+    event_types=["message"],
+    event_name="message",
+    route="/api/webpubsub"
+)
+@app.web_pub_sub_output(
+    arg_name="actions",
+    hub="web-pub-sub-ai-pin",
+    connection="WebPubSubConnectionString"
+)
+async def process_audio_message(req: func.WebPubSubEvent, actions: func.WebPubSubAction):
+    """Process audio messages from Web PubSub and generate AI responses"""
+    try:
+        message = req.data
+        if isinstance(message, str):
+            message = json.loads(message)
+        await handle_audio_message(message, actions)
+    except Exception as e:
+        logging.error(f"Error processing audio message: {str(e)}")
+        await actions.send_to_all(f"Error: {str(e)}")
+
+
+@app.function_name(name="OpenAIHttpTrigger")
+@app.route(route="openai")
+def openai_http_trigger(req: func.HttpRequest) -> func.HttpResponse:
+    """HTTP trigger for OpenAI chat completions"""
+    logging.info('OpenAI HTTP trigger function processed a request.')
 
     # Get the HTTP method
     method = req.method
