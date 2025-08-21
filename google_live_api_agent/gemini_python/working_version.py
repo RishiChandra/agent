@@ -1,6 +1,8 @@
 # gemini_live_stream.py
+
 # Mic -> Gemini Live API (WebSocket) -> Speaker (real-time)
 
+import random
 import os, asyncio, json, base64, signal
 import numpy as np
 import sounddevice as sd
@@ -20,17 +22,37 @@ WS_URL = (
     f"?key={API_KEY}"
 )
 # A native-audio dialog model; adjust if needed
+
 MODEL = "models/gemini-2.0-flash-live-001"
 # models/gemini-2.0-flash-live-001
 # models/gemini-2.5-flash-preview-native-audio-dialog
-tools = [{'google_search': {}}]
+
+tools = [
+    # {'google_search': {}},
+    {
+        "function_declarations": {
+            "name": "turn_off_lights",
+            "description": "Turn off the lights in a specified room or area.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "room": {
+                        "type": "STRING",
+                        "description": "The name of the room or area where the lights should be turned off."
+                    }
+                },
+                "required": ["room"]
+            },
+        }
+    }
+]
 
 # # gemini-2.5-flash-exp-native-audio-thinking-dialog
-VOICE = "Aoede"      # try "Kore", "Puck", …
-INPUT_SR  = 16000    # mic capture rate (PCM16 mono)
-OUTPUT_SR = 24000    # Gemini audio out rate (PCM16 mono)
-FRAME_MS  = 50       # ~50ms blocks
-IN_BLOCK  = int(INPUT_SR  * FRAME_MS / 1000)
+VOICE = "Aoede"  # try "Kore", "Puck", …
+INPUT_SR = 16000  # mic capture rate (PCM16 mono)
+OUTPUT_SR = 24000  # Gemini audio out rate (PCM16 mono)
+FRAME_MS = 50  # ~50ms blocks
+IN_BLOCK = int(INPUT_SR * FRAME_MS / 1000)
 OUT_BLOCK = int(OUTPUT_SR * FRAME_MS / 1000)
 
 # Simple buffer to smooth out stuttering without adding latency
@@ -42,8 +64,10 @@ def pcm16_b64_from_float32(x: np.ndarray) -> str:
     pcm = (np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
     return base64.b64encode(pcm).decode("utf-8")
 
+
 def b64_to_int16_bytes(b64: str) -> bytes:
     return base64.b64decode(b64)
+
 
 def make_setup():
     # IMPORTANT: systemInstruction must be a Content object (parts[].text)
@@ -53,6 +77,7 @@ def make_setup():
             "tools": tools,
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
+                # "enable_affective_dialog": True,
                 "speechConfig": {
                     "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}
                 },
@@ -60,18 +85,78 @@ def make_setup():
             # Enable live transcripts (optional)
             "inputAudioTranscription": {},
             "outputAudioTranscription": {},
+            # "proactivity": {"proactive_audio": True},
             "systemInstruction": {
-                "parts": [{"text": "You are a helpful assistant. Be concise and respond naturally in conversation. Only respond in complete sentences. Your speech is limited to 10 seconds."}]
+                "parts": [
+                    {
+                        "text": "You are a helpful assistant. Be concise and respond naturally in conversation. Only respond in complete sentences. Your speech is limited to 10 seconds. You have a tool to get the current stock price for the given company symbol."
+                    }
+                ]
             },
         }
     }
+
+def turn_off_lights(room: str):
+    """Mock function to turn off the lights in a specified room."""
+    print(f"⚙️ Executing tool: turn_off_lights for room '{room}'")
+    # In a real app, you'd interface with a smart home API here.
+    return {"room": room, "status": "off", "message": f"Lights turned off in {room}."}
+
+async def handle_tool_call(ws, tool_call):
+    """Handles a tool call from the model by executing the function and sending back the result."""
+    print("HANDLE TOOL CALL")
+    print(f"Tool call: {json.dumps(tool_call, indent=2)}")
+    function_call = tool_call["functionCalls"][0]  # Assuming one call for simplicity
+    tool_name = function_call["name"]
+    tool_args = function_call["args"]
+    tool_call_id = function_call["id"]
+    print(f"Tool name: {tool_name}")
+    print(f"Tool args: {tool_args}")
+    print(f"Tool call id: {tool_call_id}")
+    
+
+    print(f"Received tool call: {tool_name}({json.dumps(tool_args)}) with ID: {tool_call_id}")
+
+    output = None
+    if tool_name == "turn_off_lights":
+        room = tool_args.get("room")
+        if room:
+            output = turn_off_lights(room)
+        else:
+            output = {"error": "Room not provided"}
+
+    if output is not None:
+        # The output from your tool must be a JSON string
+        tool_response_payload = {
+            "toolResponse": {
+                "functionResponses": [{"name": tool_name,
+                "response": {"action": "lights turned off"}}],
+            }
+        }
+
+        # tool_response_payload = {
+        #     "functionResponses": [
+        #         {
+        #             "id": tool_call_id,
+        #             "name": tool_name,
+        #             "response": json.dumps(output)
+        #         }
+        #     ]
+        # }
+        
+        print(f"📤 Sending tool response: {json.dumps(tool_response_payload, indent=2)}")
+        await ws.send(json.dumps(tool_response_payload))
+        print("SENT TOOL RESPONSE")
+    else:
+        print(f"⚠️ Unknown tool name: {tool_name}")
+
 
 async def run():
     if not API_KEY:
         raise SystemExit("Set GOOGLE_API_KEY in your environment.")
 
     # Queues
-    mic_q: asyncio.Queue[str]   = asyncio.Queue(maxsize=16)   # JSON strings for WS
+    mic_q: asyncio.Queue[str] = asyncio.Queue(maxsize=16)  # JSON strings for WS
     spk_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=128)  # raw int16 frames
     stop = asyncio.Event()
 
@@ -89,7 +174,7 @@ async def run():
                 except Exception as e:
                     print(f"Failed to parse setup response: {e}")
                     continue
-                
+
                 if "setupComplete" in msg:
                     print("✅ Setup complete. Streaming…")
                     break
@@ -137,9 +222,13 @@ async def run():
 
             async def mic_sender():
                 try:
-                    with sd.InputStream(channels=1, samplerate=INPUT_SR,
-                                        blocksize=IN_BLOCK, dtype="float32",
-                                        callback=mic_callback):
+                    with sd.InputStream(
+                        channels=1,
+                        samplerate=INPUT_SR,
+                        blocksize=IN_BLOCK,
+                        dtype="float32",
+                        callback=mic_callback,
+                    ):
                         print("🎤 Microphone active - start speaking!")
                         while not stop.is_set():
                             try:
@@ -155,27 +244,35 @@ async def run():
 
             async def speaker_player():
                 try:
-                    with sd.RawOutputStream(channels=1, samplerate=OUTPUT_SR,
-                                            blocksize=OUT_BLOCK, dtype="int16") as spk:
+                    with sd.RawOutputStream(
+                        channels=1,
+                        samplerate=OUTPUT_SR,
+                        blocksize=OUT_BLOCK,
+                        dtype="int16",
+                    ) as spk:
                         print("🔊 Speaker active")
                         audio_count = 0
                         audio_buffer = deque(maxlen=AUDIO_BUFFER_SIZE)
-                        
+
                         while not stop.is_set():
                             try:
                                 data = await asyncio.wait_for(spk_q.get(), timeout=0.1)
                                 if data and len(data) > 0:
                                     audio_buffer.append(data)
                                     audio_count += 1
-                                    
+
                                     # Play immediately if buffer is ready, otherwise keep buffering
                                     if len(audio_buffer) >= AUDIO_BUFFER_SIZE:
                                         # Play the oldest frame and remove it
                                         frame_to_play = audio_buffer.popleft()
                                         spk.write(frame_to_play)
-                                        print(f"🔊 Playing audio frame #{audio_count}, {len(frame_to_play)} bytes, buffer: {len(audio_buffer)}")
+                                        print(
+                                            f"🔊 Playing audio frame #{audio_count}, {len(frame_to_play)} bytes, buffer: {len(audio_buffer)}"
+                                        )
                                     else:
-                                        print(f"⏳ Buffering audio frame #{audio_count}, buffer: {len(audio_buffer)}/{AUDIO_BUFFER_SIZE}")
+                                        print(
+                                            f"⏳ Buffering audio frame #{audio_count}, buffer: {len(audio_buffer)}/{AUDIO_BUFFER_SIZE}"
+                                        )
                                 else:
                                     print("⚠️ Empty audio data received")
                             except asyncio.TimeoutError:
@@ -188,7 +285,33 @@ async def run():
 
             async def recv_loop():
                 try:
+                    responses = []
                     async for raw in ws:
+                        response = json.loads(raw.decode("UTF-8"))
+                        print(f"Response: {json.dumps(response)[:30]}")
+                        if (tool_call := response.get("toolCall")) is not None:
+                            for function_call in tool_call["functionCalls"]:
+                                responses.append(f"FunctionCall: {str(function_call)}\n")
+                                await handle_tool_call(ws, tool_call)
+                            print("SENDING TURN NOW")
+                            test_msg = {
+                                "realtimeInput": {
+                                    "text": "Hello, can you hear me?"
+                                }
+                            }
+                            await ws.send(json.dumps(test_msg))
+                            # test_msg = {
+                            # "clientContent": {
+                            #     "turnComplete": True
+                            #     }
+                            # }
+                            # await ws.send(json.dumps(test_msg))
+                            break
+
+                        # if (server_content := response.get("serverContent")) is not None:
+                        # if server_content.get("turnComplete", True):
+                        # break
+
                         try:
                             msg = json.loads(raw)
                         except Exception as e:
@@ -196,40 +319,53 @@ async def run():
                             continue
 
                         # Debug: print the message structure
-                     #   print(f"Received message: {json.dumps(msg, indent=2)}")
+                        # print(f"Received message: {json.dumps(msg, indent=2)}")
 
                         server = msg.get("serverContent")
-                        if not server:
-                            # other messages (toolCall, sessionResumptionUpdate, etc.)
-                            continue
+                        # if not server:
+                        # print(f"No server content found in the response")
+                        # print(f"Server: {server}")
+                        # # other messages (toolCall, sessionResumptionUpdate, etc.)
+                        # continue
 
                         # Optional live transcripts
-                        it = server.get("inputTranscription")
-                        if it and "text" in it:
-                            print(f"🎙️ You: {it['text']}")
-                        
-                        ot = server.get("outputTranscription")
-                        if ot and "text" in ot:
-                            print(f"🤖 Gemini: {ot['text']}")
+                        try:
+                            it = server.get("inputTranscription")
+                            if it and "text" in it:
+                                print(f"🎙️ You: {it['text']}")
+                        except Exception as e:  
+                            print(f"Error getting input transcription: {e}")
+
+                        try:
+                            ot = server.get("outputTranscription")
+                            if ot and "text" in ot:
+                                print(f"🤖 Gemini: {ot['text']}")
+                        except Exception as e:
+                            print(f"Error getting output transcription: {e}")
 
                         # Audio frames - check multiple possible locations
                         mt = server.get("modelTurn")
                         if mt:
-                        #    print(f"Model turn received: {json.dumps(mt, indent=2)}")
+                            mt_str = json.dumps(mt)
+                            print(f"Model turn: {mt_str[:100]}")
                             for part in mt.get("parts", []):
                                 inline = part.get("inlineData")
                                 if inline and "data" in inline:
-                                    print(f"Audio data found, length: {len(inline['data'])}")
+                                    print(
+                                        f"Audio data found, length: {len(inline['data'])}"
+                                    )
                                     try:
                                         audio_bytes = b64_to_int16_bytes(inline["data"])
-                                        print(f"Decoded audio bytes: {len(audio_bytes)} bytes")
+                                        print(
+                                            f"Decoded audio bytes: {len(audio_bytes)} bytes"
+                                        )
                                         spk_q.put_nowait(audio_bytes)
                                     except asyncio.QueueFull:
                                         print("Speaker queue full, dropping audio frame")
                                         pass
                                     except Exception as e:
                                         print(f"Error processing audio data: {e}")
-                        
+
                         # Also check for direct audio in the message
                         if "audio" in msg:
                             print(f"Direct audio message: {json.dumps(msg['audio'], indent=2)}")
@@ -243,6 +379,7 @@ async def run():
                 except Exception as e:
                     print(f"Receive loop error: {e}")
                     import traceback
+
                     traceback.print_exc()
 
             # Graceful shutdown (Ctrl+C)
@@ -255,11 +392,12 @@ async def run():
 
             print("🚀 Starting audio streams...")
             await asyncio.gather(mic_sender(), speaker_player(), recv_loop())
-            
+
     except websockets.exceptions.ConnectionClosed as e:
         print(f"WebSocket connection closed: {e}")
     except Exception as e:
         print(f"Connection error: {e}")
+
 
 if __name__ == "__main__":
     try:
