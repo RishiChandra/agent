@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+gunicorn
+python-dotenv
+google-genai
+websockets
+httpx
+requests

@@ -77,3 +77,5 @@ I'm thrilled to share these insights and examples with the developer community!
 While this repository primarily serves as a companion to the articles, feel free to raise issues for any bugs you find in the code or suggest improvements.
 
 Happy coding, and I hope you find this series and the code examples valuable on your Generative AI journey!
+
+
