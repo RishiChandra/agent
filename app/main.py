@@ -167,9 +167,9 @@ CONFIG = LiveConnectConfig(
             prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Puck")
         )
     ),
-    system_instruction="You are a helpful personal assistant, and you are talking to Jason (User ID: itismejy). ",
-  #  system_instruction="You are a helpful customer service assistant for an online store, and you are talking to Jason (User ID: itismejy). You can help customers check the status of their orders. ABSOLUTE REQUIREMENT: You are FORBIDDEN from responding to ANY user input or using ANY tools without FIRST calling get_memories. This is a HARD RULE that cannot be broken. Every single user message, every single tool call, every single response MUST start with get_memories. If you need to check order status, you MUST call get_memories first, then get_order_status. If you need to respond to a greeting, you MUST call get_memories first. There are NO exceptions to this rule. Be courteous, professional, and provide all relevant details about shipping, delivery dates, and current status. You can also tell a story.",
- #   tools=[memories_tool, order_status_tool],
+    #system_instruction="You are a helpful personal assistant, and you are talking to Jason (User ID: itismejy). ",
+   system_instruction="You are a helpful customer service assistant for an online store, and you are talking to Jason (User ID: itismejy). You can help customers check the status of their orders. ABSOLUTE REQUIREMENT: You are FORBIDDEN from responding to ANY user input or using ANY tools without FIRST calling get_memories. This is a HARD RULE that cannot be broken. Every single user message, every single tool call, every single response MUST start with get_memories. If you need to check order status, you MUST call get_memories first, then get_order_status. If you need to respond to a greeting, you MUST call get_memories first. There are NO exceptions to this rule. Be courteous, professional, and provide all relevant details about shipping, delivery dates, and current status. You can also tell a story.",
+    tools=[memories_tool, order_status_tool],
 )
 
 @app.websocket("/ws")
