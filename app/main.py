@@ -17,6 +17,11 @@ from google.genai.types import (
     Tool,
 )
 
+from agents import general_thinking_agent
+
+# Instantiate the general thinking agent
+generalThinkingAgent = general_thinking_agent.GeneralThinkingAgent()
+
 # python -m uvicorn app.main:app --host 0.0.0.0 --port \$PORT
 
 # https://ai.google.dev/gemini-api/docs/live-guide
@@ -44,115 +49,21 @@ SEND_SAMPLE_RATE = 16000
 CHUNK_SIZE = 512
 CHANNELS = 1
 
-# ---- Mock tools (identical to working example) ----
-def get_order_status(order_id):
-    """Mock order status API that returns randomized status for an order ID."""
-    # Define possible order statuses and shipment methods
-    statuses = ["processing", "shipped", "delivered"]
-    shipment_methods = ["standard", "express", "next day", "international"]
-
-    # Generate random data based on the order ID to ensure consistency for the same ID
-    # Using the sum of ASCII values of the order ID as a seed
-    seed = sum(ord(c) for c in str(order_id))
-    random.seed(seed)
-
-    # Generate order data
-    status = random.choice(statuses)
-    shipment = random.choice(shipment_methods)
-
-    # Generate dates based on status
-    order_date = "2024-05-" + str(random.randint(12, 28)).zfill(2)
-
-    estimated_delivery = None
-    shipped_date = None
-    delivered_date = None
-
-    if status == "processing":
-        estimated_delivery = "2024-06-" + str(random.randint(1, 15)).zfill(2)
-    elif status == "shipped":
-        shipped_date = "2024-05-" + str(random.randint(1, 28)).zfill(2)
-        estimated_delivery = "2024-06-" + str(random.randint(1, 15)).zfill(2)
-    elif status == "delivered":
-        shipped_date = "2024-05-" + str(random.randint(1, 20)).zfill(2)
-        delivered_date = "2024-05-" + str(random.randint(21, 28)).zfill(2)
-
-    # Reset random seed to ensure other functions aren't affected
-    random.seed()
-
-    result = {
-        "order_id": order_id,
-        "status": status,
-        "order_date": order_date,
-        "shipment_method": shipment,
-        "estimated_delivery": estimated_delivery,
-    }
-
-    if shipped_date:
-        result["shipped_date"] = shipped_date
-
-    if delivered_date:
-        result["delivered_date"] = delivered_date
-
-    print(f"Order status for {order_id}: {status}")
-
-    return result
-
-def get_memories(user_id=None):
-    """Mock memories API that returns user context and conversation history."""
-    # Mock user memories and context
-    memories = {
-        "user_id": user_id or "default_user",
-        "conversation_history": [
-            "User asked about order status",
-            "User inquired about shipping times",
-            "User requested delivery updates"
-        ],
-        "preferences": {
-            "communication_style": "professional",
-            "preferred_topics": ["order tracking", "shipping", "customer service"]
-        },
-        "last_interaction": "2024-05-28",
-        "total_orders": 5,
-        "loyalty_status": "silver"
-    }
-    
-    print(f"📚 Retrieved memories for user: {memories['user_id']}")
-    return memories
-
-# Define the tools (identical to working example)
-memories_tool = Tool(
+think_tool = Tool(
     function_declarations=[
         FunctionDeclaration(
-            name="get_memories",
-            description="Get user memories, conversation history, and context. This should always be called before any other tool usage to establish user context.",
+            name="think_and_repeat_output",
+            behavior="NON_BLOCKING",
+            description="Think about the user input and return the thinking results. Use this information to provide a helpful response.",
             parameters={
                 "type": "OBJECT",
                 "properties": {
-                    "user_id": {
+                    "user_input": {
                         "type": "STRING",
-                        "description": "The user ID to retrieve memories for. If not provided, uses default user.",
+                        "description": "The user input to think about. This should be the exact user input that was just said.",
                     }
                 },
-                "required": [],
-            },
-        )
-    ]
-)
-
-order_status_tool = Tool(
-    function_declarations=[
-        FunctionDeclaration(
-            name="get_order_status",
-            description="Get the current status and details of an order.",
-            parameters={
-                "type": "OBJECT",
-                "properties": {
-                    "order_id": {
-                        "type": "STRING",
-                        "description": "The order ID to look up.",
-                    }
-                },
-                "required": ["order_id"],
+                "required": ["user_input"],
             },
         )
     ]
@@ -168,8 +79,15 @@ CONFIG = LiveConnectConfig(
         )
     ),
     #system_instruction="You are a helpful personal assistant, and you are talking to Jason (User ID: itismejy). ",
-   system_instruction="You are a helpful customer service assistant for an online store, and you are talking to Jason (User ID: itismejy). You can help customers check the status of their orders. ABSOLUTE REQUIREMENT: You are FORBIDDEN from responding to ANY user input or using ANY tools without FIRST calling get_memories. This is a HARD RULE that cannot be broken. Every single user message, every single tool call, every single response MUST start with get_memories. If you need to check order status, you MUST call get_memories first, then get_order_status. If you need to respond to a greeting, you MUST call get_memories first. There are NO exceptions to this rule. Be courteous, professional, and provide all relevant details about shipping, delivery dates, and current status. You can also tell a story.",
-    tools=[memories_tool, order_status_tool],
+    system_instruction=(
+        "You are a helpful assistant. For any user input, you want to have sufficient "
+        "information before you make a response. If you don't have sufficient information, "
+        "think about it first using the think tool, and then use the information returned "
+        "by the think tool to provide a helpful response to the user. If you use the Think "
+        "tool, provide a short response to the user such as \"Let me see\" immediately and then wait for the tool to complete. "
+        "If used, always incorporate the results from the think tool into your response."
+    ),
+   tools=[think_tool],
 )
 
 @app.websocket("/ws")
@@ -314,58 +232,43 @@ async def websocket_endpoint(websocket: WebSocket):
                                 call_id = function_call.id
 
                                 # Handle get_memories function
-                                if name == "get_memories":
+                                if name == "think_and_repeat_output":
                                     try:
                                         # Get user_id (optional)
-                                        user_id = args.get("user_id")
-                                        # Call get_memories function
-                                        result = get_memories(user_id)
+                                        user_id = args.get("user_input")
+                                        # Call think_and_repeat_output function
+                                        result = generalThinkingAgent.think(user_id)
+                                        print(f"generalThinkingAgent.think(user_id) {result}")
+                                        return_string = f"{result}."
                                         function_responses.append(
                                             {
                                                 "name": name,
-                                                "response": {"result": result},
+                                                "response": {"result": return_string},
                                                 "id": call_id,
-                                                "scheduling": "SILENT"
+                                                "scheduling": "WHEN_IDLE"
                                             }
                                         )
-                                        print(f"📚 Memories function executed for user: {user_id or 'default_user'}")
                                     except Exception as e:
-                                        print(f"Error executing memories function: {e}")
+                                        print(f"Error: {e}")
                                         traceback.print_exc()
 
-                                # Handle get_order_status function
-                                if name == "get_order_status":
-                                    try:
-                                        # Get order_id (required)
-                                        order_id = args["order_id"]
-                                        # Call order status function
-                                        result = get_order_status(order_id)
 
-                                        function_responses.append(
-                                            {
-                                                "name": name,
-                                                "response": {"result": result},
-                                                "id": call_id,
-                                            }
-                                        )
-
-                                        print(f"📦 Order status function executed for order {order_id}")
-
-                                    except Exception as e:
-                                        print(f"Error executing order status function: {e}")
-                                        traceback.print_exc()
-
-                            # Send function responses back to Gemini (identical to working example)
+                            # Send function responses back to Gemini
                             if function_responses:
                                 print(f"Sending function responses: {function_responses}")
+                                print(f"function_responses: {function_responses[0]["response"]}")
+                                
+                                # Create proper FunctionResponse objects
+                                gemini_function_responses = []
                                 for response in function_responses:
-                                    await session.send_tool_response(
-                                        function_responses={
-                                            "name": response["name"],
-                                            "response": response["response"]["result"],
-                                            "id": response["id"],
-                                        }
+                                    gemini_response = types.FunctionResponse(
+                                        id=response["id"],
+                                        name=response["name"],
+                                        response=response["response"]
                                     )
+                                    gemini_function_responses.append(gemini_response)
+                                
+                                await session.send_tool_response(function_responses=gemini_function_responses)
                                 print("Finished sending function responses")
                                 continue
 
@@ -428,6 +331,6 @@ async def websocket_endpoint(websocket: WebSocket):
         if 'session' in locals():
             await session.close()
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=8000)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,2 +1,11 @@
 websockets
 pyaudio
+fastapi
+uvicorn[standard]
+gunicorn
+python-dotenv
+google-genai
+httpx
+requests
+openai
+pytest
