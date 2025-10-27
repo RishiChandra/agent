@@ -8,8 +8,8 @@ load_dotenv()
 # Azure OpenAI Configuration
 deployment = "gpt-4.1-nano"
 api_version = "2024-12-01-preview"
-endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-api_key = os.getenv("AZURE_OPENAI_API_KEY")
+endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
+api_key = os.environ["AZURE_OPENAI_API_KEY"]
 
 def call_openai(messages, tools=None):
     client = get_openai_client()
