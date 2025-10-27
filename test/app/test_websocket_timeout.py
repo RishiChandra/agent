@@ -5,16 +5,38 @@ import base64
 import signal
 import sys
 from datetime import datetime
+import logging
+
+# Enable websockets debug logging to see ping/pong frames
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger('websockets')
+logger.setLevel(logging.DEBUG)
 
 async def test_websocket_timeout_idle():
-    """Test websocket timeout when completely idle (no messages sent)"""
+    """Test websocket timeout when completely idle (no messages sent)
+    
+    Logging:
+    - DEBUG logs from 'websockets' module will show ping/pong frame details
+    - Client pings: DISABLED
+    - Server pings: DISABLED
+    - Connection will timeout if no activity occurs
+    """
     uri = "ws://localhost:8000/ws"
     # uri = "wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws"
     
     try:
         print("🔌 Connecting to WebSocket...")
-        async with websockets.connect(uri) as ws:
+        print("📝 DEBUG logs will show raw ping/pong frames from websockets library\n")
+        # Connect WITHOUT client pings
+        async with websockets.connect(
+            uri,
+            ping_interval=None,  # Disable client pings
+            ping_timeout=None,   # No ping timeout
+            close_timeout=10,
+            logger=logger
+        ) as ws:
             print("✅ Connected to WebSocket")
+            print("🚫 Client pings DISABLED")
             
             # Send a test message to establish connection
             test_msg = json.dumps({"text": "Hello, starting timeout test"})
@@ -81,7 +103,7 @@ async def test_websocket_timeout_idle():
                 pass
             
             if connection_alive:
-                print("\n✅ 30 seconds passed - connection still alive!")
+                print(f"\n✅ 30 seconds passed - connection still alive!")
                 
                 # Try to send a message to confirm connection is still working
                 try:
@@ -107,8 +129,15 @@ async def test_websocket_timeout_with_silence():
     
     try:
         print("🔌 Connecting to WebSocket...")
-        async with websockets.connect(uri) as ws:
+        async with websockets.connect(
+            uri,
+            ping_interval=None,
+            ping_timeout=None,
+            close_timeout=10,
+            logger=logger
+        ) as ws:
             print("✅ Connected to WebSocket")
+            print("🚫 Client pings DISABLED")
             
             # Send silent audio continuously to keep connection alive
             silent_chunk = b'\x00' * 1024  # Silent audio data (zeros)
@@ -192,8 +221,15 @@ async def test_websocket_timeout_immediate():
     
     try:
         print("🔌 Connecting to WebSocket...")
-        async with websockets.connect(uri) as ws:
+        async with websockets.connect(
+            uri,
+            ping_interval=None,
+            ping_timeout=None,
+            close_timeout=10,
+            logger=logger
+        ) as ws:
             print("✅ Connected to WebSocket")
+            print("🚫 Client pings DISABLED")
             print("⏸️  Not sending any initial message...")
             print("⏱️  Waiting for 30 seconds without sending anything...\n")
             
