@@ -9,11 +9,11 @@ def get_db_connection():
     """Get a connection to the PostgreSQL database from environment variables."""
     try:
         conn = psycopg2.connect(
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT", "5432"),
-            database=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD")
+            host=os.environ["DB_HOST"],
+            port=os.environ.get("DB_PORT", "5432"),
+            database=os.environ["DB_NAME"],
+            user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"]
         )
         return conn
     except psycopg2.Error as e:

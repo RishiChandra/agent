@@ -104,7 +104,13 @@ echo "🔧 Setting environment variables..."
 az containerapp update \
     --name $CONTAINER_APP_NAME \
     --resource-group $RESOURCE_GROUP \
-    --set-env-vars "GOOGLE_API_KEY=${GOOGLE_API_KEY}" \
+    --set-env-vars "AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}" \
+                   "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}" \
+                   "DB_HOST=${DB_HOST}" \
+                   "DB_NAME=${DB_NAME}" \
+                   "DB_USER=${DB_USER}" \
+                   "DB_PASSWORD=${DB_PASSWORD}" \
+                   "GOOGLE_API_KEY=${GOOGLE_API_KEY}" \
     --output none
 
 # Get the app URL
