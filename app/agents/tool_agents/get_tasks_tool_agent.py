@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 import sys
 import os
-from app.database import execute_query
+from database import execute_query
 
 from ..openai_client import call_openai
 

@@ -2,11 +2,12 @@ import unittest
 import sys
 import os
 
-# Add the parent directory to the Python path to import from the main app
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+# Add the app directory to the Python path to enable imports like "from database import ..."
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
+sys.path.insert(0, os.path.join(project_root, 'app'))
+sys.path.insert(0, project_root)
 
 from app.agents.general_thinking_agent import GeneralThinkingAgent
-
 
 class GeneralThinkingAgentTest(unittest.TestCase):
     

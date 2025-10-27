@@ -37,7 +37,7 @@ echo "📝 Registry: $REGISTRY_LOGIN_SERVER"
 
 # Build and push the Docker image
 echo "🐳 Building and pushing Docker image..."
-docker build -t $IMAGE_NAME .
+docker build --platform linux/amd64 -t $IMAGE_NAME .
 docker tag $IMAGE_NAME $REGISTRY_LOGIN_SERVER/$IMAGE_NAME:latest
 
 echo "🔐 Logging into container registry..."
