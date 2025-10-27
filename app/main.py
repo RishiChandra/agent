@@ -33,7 +33,7 @@ app = FastAPI()
 @app.get("/healthz")
 def healthz():
     print("/healthz called and accepted")
-    return {"ok": True}
+    return {"ok": True, "last_updated": "Oct 26 18:45"}
 
 
 # ===== Gemini config =====
@@ -94,6 +94,7 @@ CONFIG = LiveConnectConfig(
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("✅ Client connected")
+    print("🚫 Server WS pings DISABLED")
 
     # Queues to mirror the working example
     audio_queue = asyncio.Queue()
@@ -256,7 +257,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Send function responses back to Gemini
                             if function_responses:
                                 print(f"Sending function responses: {function_responses}")
-                                print(f"function_responses: {function_responses[0]["response"]}")
+                                print(f"function_responses: {function_responses[0]['response']}")
                                 
                                 # Create proper FunctionResponse objects
                                 gemini_function_responses = []
@@ -326,11 +327,19 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
-    finally:
-        # Clean up the session
-        if 'session' in locals():
-            await session.close()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="debug",
+        ws="websockets",          # ensure the websockets backend
+        ws_ping_interval=None,    # completely disable server pings
+        ws_ping_timeout=None,      # disable timeout
+
+    )
+
+        #     ws_ping_interval=None,    # completely disable server pings
+        # ws_ping_timeout=None      # disable timeout

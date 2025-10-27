@@ -14,6 +14,14 @@ REGISTRY_NAME="aipinregistry"
 
 echo "🚀 Starting simple Azure Container Apps deployment..."
 
+# Load environment variables from .env file if it exists
+if [ -f .env ]; then
+    echo "📄 Loading environment variables from .env file..."
+    set -a  # automatically export all variables
+    source .env
+    set +a  # disable automatic export
+fi
+
 # Check if Azure CLI is installed and logged in
 if ! command -v az &> /dev/null; then
     echo "❌ Azure CLI is not installed. Please install it first."
@@ -35,16 +43,22 @@ REGISTRY_PASSWORD=$(az acr credential show --name $REGISTRY_NAME --query "passwo
 
 echo "📝 Registry: $REGISTRY_LOGIN_SERVER"
 
+# Generate timestamp for unique image tag
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+echo "🕐 Using timestamp: $TIMESTAMP"
+
 # Build and push the Docker image
 echo "🐳 Building and pushing Docker image..."
 docker build --platform linux/amd64 -t $IMAGE_NAME .
 docker tag $IMAGE_NAME $REGISTRY_LOGIN_SERVER/$IMAGE_NAME:latest
+docker tag $IMAGE_NAME $REGISTRY_LOGIN_SERVER/$IMAGE_NAME:$TIMESTAMP
 
 echo "🔐 Logging into container registry..."
 echo $REGISTRY_PASSWORD | docker login $REGISTRY_LOGIN_SERVER -u $REGISTRY_USERNAME --password-stdin
 
 echo "📤 Pushing image to registry..."
 docker push $REGISTRY_LOGIN_SERVER/$IMAGE_NAME:latest
+docker push $REGISTRY_LOGIN_SERVER/$IMAGE_NAME:$TIMESTAMP
 
 # Check if Container App exists, if not create it
 if ! az containerapp show --name $CONTAINER_APP_NAME --resource-group $RESOURCE_GROUP &> /dev/null; then
@@ -77,11 +91,11 @@ if ! az containerapp show --name $CONTAINER_APP_NAME --resource-group $RESOURCE_
         --max-replicas 3 \
         --output none
 else
-    echo "🔄 Updating existing Container App..."
+    echo "🔄 Updating existing Container App with timestamped image..."
     az containerapp update \
         --name $CONTAINER_APP_NAME \
         --resource-group $RESOURCE_GROUP \
-        --image $REGISTRY_LOGIN_SERVER/$IMAGE_NAME:latest \
+        --image $REGISTRY_LOGIN_SERVER/$IMAGE_NAME:$TIMESTAMP \
         --output none
 fi
 
@@ -98,6 +112,7 @@ echo "🔗 Getting app URL..."
 APP_URL=$(az containerapp show --name $CONTAINER_APP_NAME --resource-group $RESOURCE_GROUP --query "properties.configuration.ingress.fqdn" --output tsv)
 
 echo "✅ Deployment completed successfully!"
+echo "📦 Deployed image: $IMAGE_NAME:$TIMESTAMP"
 echo "🌐 Your app is available at: https://$APP_URL"
 echo "🔌 WebSocket endpoint: wss://$APP_URL/ws"
 echo "🏥 Health check: https://$APP_URL/healthz"
