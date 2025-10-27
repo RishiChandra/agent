@@ -1,5 +1,8 @@
 import json
 from datetime import datetime, timezone
+import sys
+import os
+from app.database import execute_query
 
 from ..openai_client import call_openai
 
@@ -50,79 +53,30 @@ class GetTasksToolAgent:
         start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
         end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
 
-        # REPLACE WITH POSTGRES QUERY
-        return json.dumps({
-            "tasks": mock_tasks,
-            "total_count": len(mock_tasks),
-            "time_range": {
-                "start": start_time.isoformat() if start_time else None,
-                "end": end_time.isoformat() if end_time else None
-            }
-        })
+        # Hardcoded UID for now
+        uid = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
 
-mock_tasks = [
-        {
-            "id": 1,
-            "title": "Morning workout",
-            "description": "30-minute cardio session at the gym",
-            "status": "pending",
-            "scheduled_time": "2024-01-15T07:00:00Z",
-            "category": "health"
-        },
-        {
-            "id": 2,
-            "title": "Team standup meeting",
-            "description": "Daily standup with development team",
-            "status": "pending",
-            "scheduled_time": "2024-01-15T09:00:00Z",
-            "category": "work"
-        },
-        {
-            "id": 3,
-            "title": "Review project proposal",
-            "description": "Review and provide feedback on Q1 project proposal",
-            "status": "pending",
-            "scheduled_time": "2024-01-15T10:00:00Z",
-            "category": "work"
-        },
-        {
-            "id": 4,
-            "title": "Lunch with client",
-            "description": "Business lunch meeting with potential client",
-            "status": "pending",
-            "scheduled_time": "2024-01-15T12:00:00Z",
-            "category": "work"
-        },
-        {
-            "id": 5,
-            "title": "Grocery shopping",
-            "description": "Buy ingredients for weekend meal prep",
-            "status": "pending",
-            "scheduled_time": "2024-01-15T18:00:00Z",
-            "category": "personal"
-        },
-        {
-            "id": 6,
-            "title": "Call dentist",
-            "description": "Schedule annual checkup",
-            "status": "pending",
-            "scheduled_time": "2024-01-15T19:00:00Z",
-            "category": "personal"
-        },
-        {
-            "id": 7,
-            "title": "Update project documentation",
-            "description": "Update API documentation for new features",
-            "status": "in_progress",
-            "scheduled_time": "2024-01-15T14:00:00Z",
-            "category": "work"
-        },
-        {
-            "id": 8,
-            "title": "Evening meditation",
-            "description": "20-minute mindfulness meditation session",
-            "status": "pending",
-            "scheduled_time": "2024-01-15T20:00:00Z",
-            "category": "health"
-        }
-    ]
+        # Execute PostgreSQL query
+        try:
+            query = """
+                SELECT * FROM tasks 
+                WHERE user_id = %s
+            """
+            tasks = execute_query(query, (uid,))
+            print(f"Tasks: {tasks}")
+            
+            # Convert datetime objects to ISO format strings for JSON serialization
+            serializable_tasks = []
+            for task in tasks:
+                serializable_task = dict(task)
+                # Convert datetime objects to ISO format strings
+                if 'time_to_execute' in serializable_task and serializable_task['time_to_execute']:
+                    serializable_task['time_to_execute'] = serializable_task['time_to_execute'].isoformat()
+                serializable_tasks.append(serializable_task)
+            
+            return json.dumps({
+                "tasks": serializable_tasks,
+                "total_count": len(serializable_tasks),
+            })
+        except Exception as e:
+            print(f"Error fetching tasks from database: {e}")

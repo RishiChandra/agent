@@ -6,3 +6,4 @@ google-genai
 websockets
 httpx
 requests
+psycopg2-binary

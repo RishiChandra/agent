@@ -9,3 +9,4 @@ httpx
 requests
 openai
 pytest
+psycopg2
