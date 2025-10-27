@@ -1,11 +1,34 @@
 import os
 from openai import AzureOpenAI
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Azure OpenAI Configuration
 deployment = "gpt-4.1-nano"
 api_version = "2024-12-01-preview"
 endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
+
+def call_openai(messages, tools=None):
+    client = get_openai_client()
+    deployment_name = get_deployment_name()
+
+    if tools is not None:
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=messages,
+            tools=tools,
+            tool_choice="required"
+        )
+    else:
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=messages
+        )
+    
+    return response
 
 def get_openai_client():
     """

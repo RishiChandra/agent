@@ -1,10 +1,12 @@
+websockets
+pyaudio
 fastapi
 uvicorn[standard]
 gunicorn
 python-dotenv
 google-genai
-websockets
 httpx
 requests
-psycopg2-binary
 openai
+pytest
+psycopg2

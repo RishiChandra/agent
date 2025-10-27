@@ -1,0 +1,5 @@
+google-cloud-aiplatform
+google-generativeai
+pyaudio
+soundfile
+numpy
