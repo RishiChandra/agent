@@ -54,7 +54,7 @@ class GetTasksToolAgent:
         end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
 
         # Hardcoded UID for now
-        uid = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
+        user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
 
         # Execute PostgreSQL query
         try:
@@ -62,7 +62,7 @@ class GetTasksToolAgent:
                 SELECT * FROM tasks 
                 WHERE user_id = %s
             """
-            tasks = execute_query(query, (uid,))
+            tasks = execute_query(query, (user_id,))
             print(f"Tasks: {tasks}")
             
             # Convert datetime objects to ISO format strings for JSON serialization
