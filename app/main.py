@@ -16,7 +16,7 @@ from google.genai.types import (
     FunctionDeclaration,
     Tool,
 )
-
+from session_management_utils import get_session, create_session, update_session_status
 from agents import general_thinking_agent
 
 # Instantiate the general thinking agent
@@ -164,7 +164,13 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # Keep the session alive for the entire WebSocket connection
         async with client.aio.live.connect(model=MODEL, config=CONFIG) as session:
-            
+            # Get the session for the user_id
+            #user_id = websocket.user_id
+            user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
+            session = get_session(user_id)
+            if not session:
+                session = create_session(user_id)
+
             async def ws_reader():
                 while True:
                     try:
@@ -320,6 +326,8 @@ async def websocket_endpoint(websocket: WebSocket):
             
     except WebSocketDisconnect:
         print("❌ Client disconnected")
+        # Update the session status to inactive
+        update_session_status(user_id, False)
     except Exception as e:
         print(f"Error in websocket endpoint: {e}")
         traceback.print_exc()
@@ -327,6 +335,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+        update_session_status(user_id, False)
 
 if __name__ == "__main__":
     import uvicorn

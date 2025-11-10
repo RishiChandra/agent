@@ -60,3 +60,38 @@ def execute_query(query, params=None):
             cursor.close()
             conn.close()
 
+def execute_update(query, params=None):
+    """
+    Execute an INSERT, UPDATE, or DELETE query and commit the changes.
+    
+    Args:
+        query: SQL query string
+        params: Optional tuple of parameters for the query
+        
+    Returns:
+        Number of rows affected
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+        
+        rows_affected = cursor.rowcount
+        conn.commit()
+        return rows_affected
+    
+    except psycopg2.Error as e:
+        if conn:
+            conn.rollback()
+        print(f"Error executing update: {e}")
+        raise
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
