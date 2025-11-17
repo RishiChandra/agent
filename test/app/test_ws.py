@@ -143,8 +143,8 @@ async def test_ws():
             # Run both tasks concurrently
             await asyncio.gather(send_audio(), recv_audio())
             
-    except websockets.exceptions.ConnectionRefused:
-        print("❌ Connection refused. Make sure the FastAPI server is running on localhost:8000")
+    except (ConnectionRefusedError, OSError) as e:
+        print(f"❌ Connection refused. Make sure the FastAPI server is running. Error: {e}")
     except Exception as e:
         print(f"Error in test_ws: {e}")
     finally:
