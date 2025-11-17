@@ -86,9 +86,8 @@ class AudioManager:
         print("🎤 Mic + 🔈 Speaker cleaned up")
 
 async def test_ws():
-    user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
-    #uri = f"ws://localhost:8000/ws/{user_id}"
-    uri = f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{user_id}"
+    #uri = "ws://localhost:8000/ws"
+    uri = "wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws"
     audio_mgr = AudioManager()
     
     try:
