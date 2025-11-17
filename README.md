@@ -34,3 +34,10 @@ In general keep PRs as small as feasible. Minimize commit and branch complexity 
 We host a postgress sql server in our Azure resource group.
 Use pgAdmin4 (or other sql client of choice) to connect to the db.
 Credentials can be found in internal docs (ask Rishi) or in the env vars of the web app / app service.
+
+## Listener Function app
+Deploy with func azure functionapp publish listener in listener dir
+
+Testing:
+You can quickly create a task with ```python testing/quick_enqueue.py 1```
+And then you can write Kusto Queries on the Azure Portal for the Function App
