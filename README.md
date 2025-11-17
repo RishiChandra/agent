@@ -41,3 +41,4 @@ Deploy with func azure functionapp publish listener in listener dir
 Testing:
 You can quickly create a task with ```python testing/quick_enqueue.py 1```
 And then you can write Kusto Queries on the Azure Portal for the Function App
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/20b75010-c7dc-487b-8471-729996f7e121" />
