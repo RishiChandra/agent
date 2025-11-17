@@ -33,7 +33,7 @@ app = FastAPI()
 @app.get("/healthz")
 def healthz():
     print("/healthz called and accepted")
-    return {"ok": True, "last_updated": "Oct 26 18:45"}
+    return {"ok": True, "last_updated": "Nov 16 17:34 PST"}
 
 
 # ===== Gemini config =====
@@ -90,10 +90,10 @@ CONFIG = LiveConnectConfig(
    tools=[think_tool],
 )
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: str):
     await websocket.accept()
-    print("✅ Client connected")
+    print(f"✅ Client connected with user_id: {user_id}")
     print("🚫 Server WS pings DISABLED")
 
     # Queues to mirror the working example
@@ -162,14 +162,14 @@ async def websocket_endpoint(websocket: WebSocket):
         print("✅ Audio playback interrupted and cleared")
 
     try:
-        # Keep the session alive for the entire WebSocket connection
-        async with client.aio.live.connect(model=MODEL, config=CONFIG) as session:
-            # Get the session for the user_id
-            #user_id = websocket.user_id
-            user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
-            session = get_session(user_id)
-            if not session:
-                session = create_session(user_id)
+        # Get the database session for the user_id
+        #user_id = websocket.user_id
+        db_session = get_session(user_id)
+        if not db_session:
+            db_session = create_session(user_id)
+        
+        # Keep the Gemini session alive for the entire WebSocket connection
+        async with client.aio.live.connect(model=MODEL, config=CONFIG) as gemini_session:
 
             async def ws_reader():
                 while True:
@@ -197,7 +197,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         data = await audio_queue.get()
                         # Always send the audio data to Gemini (identical to working example)
-                        await session.send_realtime_input(
+                        await gemini_session.send_realtime_input(
                             
                             media={
                                 "data": data,
@@ -207,6 +207,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         audio_queue.task_done()
                     except Exception as e:
                         print(f"Error in process_and_send_audio: {e}")
+                        print(traceback.format_exc())
                         break
 
             async def receive_and_play():
@@ -215,7 +216,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     input_transcriptions = []
                     output_transcriptions = []
 
-                    async for response in session.receive():
+                    async for response in gemini_session.receive():
                         # retrieve continuously resumable session ID (identical to working example)
                         if response.session_resumption_update:
                             update = response.session_resumption_update
@@ -275,7 +276,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     )
                                     gemini_function_responses.append(gemini_response)
                                 
-                                await session.send_tool_response(function_responses=gemini_function_responses)
+                                await gemini_session.send_tool_response(function_responses=gemini_function_responses)
                                 print("Finished sending function responses")
                                 continue
 
