@@ -3,12 +3,13 @@
 Simple script to send a scheduled message to Azure Service Bus queue.
 
 Usage:
-    python quick_enqueue.py "message" 5
-    (schedules message for 5 minutes from now)
+    python quick_enqueue.py <minutes>
+    (schedules message for specified minutes from now)
 """
 
 import os
 import sys
+import json
 from datetime import datetime, timedelta, UTC
 
 from dotenv import load_dotenv
@@ -25,14 +26,20 @@ except ImportError:
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python quick_enqueue.py \"message\" <minutes>")
-        print("Example: python quick_enqueue.py \"Hello\" 5")
+    if len(sys.argv) != 2:
+        print("Usage: python quick_enqueue.py <minutes>")
+        print("Example: python quick_enqueue.py 5")
         sys.exit(1)
     
-    message_content = sys.argv[1]
+    message_contents = {
+        "task_id": "a1f7c1c4-2b5c-4a19-9fc3-2d4b1a7c9e01",
+        "title": "Morning workout",
+        "description": "30-minute cardio session at the gym"
+    }
+    message_content = json.dumps(message_contents)
+    
     try:
-        minutes = int(sys.argv[2])
+        minutes = int(sys.argv[1])
     except ValueError:
         print("Error: minutes must be a number")
         sys.exit(1)
