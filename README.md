@@ -21,8 +21,16 @@ Deactivate with...```deactivate```
 The Agent logic lives in the app dir. *This should eventually be renamed
 To run a local websocket server, run ```python main.py```
 
-To test (local vs deployed can be configured in the test), run ```python main.py```
+To test (local vs deployed can be configured in the test), run ```python -m app.test_ws``` from the test directory
 
+Instructions for deploying the app to Azure:
+Mac Instructions:
+Run ```bash azure-deploy-simple.sh ``` to deploy container
+
+Windows Instructions:
+Ensure you have git bash. All instructions will be assuming you are in bash.
+Ensure you have docker desktop running. Try ```docker ps``` and see that it prints a table (empty is fine)
+Run ```bash azure-deploy-simple.sh ``` to deploy container
 
 ## Git Rules
 Create a new branch: ```git checkout -b <name>```
