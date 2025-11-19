@@ -85,9 +85,10 @@ CONFIG = LiveConnectConfig(
         "think about it first using the think tool, and then use the information returned "
         "by the think tool to provide a helpful response to the user. If you use the Think "
         "tool, provide a short response to the user such as \"Let me see\" immediately and then wait for the tool to complete. "
-        "If used, always incorporate the results from the think tool into your response."
+        "You also have access to a Google Search tool for information that can be easily found online; use it when appropriate, "
+        "but continue to prefer the think tool, especially when you need any personal information about the user."
     ),
-   tools=[think_tool],
+   tools=[{"google_search": {}}, think_tool],
 )
 
 @app.websocket("/ws/{user_id}")
