@@ -4,8 +4,9 @@
 Clone the repo to whatever IDE you choose. Cursor AI is suggested.
 Create a top level .env file. The contents can be copy pasted from the internal doc (ask Rishi)
 
-## Create Virtual Environment
-Follow these steps in the root directory and in the test directory
+## Create Virtual Environments
+All folders (features for lack of a better term) in the root repo should have their own venv.
+Ideally, all development is done in the venv and scoped into the particular feature that is being worked on.
 
 ```python -m venv .venv``` if python is not installed, can use py (windows only)
 
@@ -15,6 +16,13 @@ If this is first time using the venv run:
 ```pip install -r requirements.txt``` for python reqs.
 
 Deactivate with...```deactivate```
+
+## Agent Developmet
+The Agent logic lives in the app dir. *This should eventually be renamed
+To run a local websocket server, run ```python main.py```
+
+To test (local vs deployed can be configured in the test), run ```python main.py```
+
 
 ## Git Rules
 Create a new branch: ```git checkout -b <name>```
