@@ -23,6 +23,8 @@ To run a local websocket server, run ```python main.py```
 
 To test (local vs deployed can be configured in the test), run ```python -m app.test_ws``` from the test directory
 
+Run ```python -m app.test_proactive_messaging``` from the test directory too to make sure that proactive messaging works
+
 Instructions for deploying the app to Azure:
 Mac Instructions:
 Run ```bash azure-deploy-simple.sh ``` to deploy container
