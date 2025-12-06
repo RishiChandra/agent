@@ -23,6 +23,8 @@ To run a local websocket server, run ```python main.py```
 
 To test (local vs deployed can be configured in the test), run ```python -m app.test_ws``` from the test directory
 
+Run ```python -m app.test_proactive_messaging``` from the test directory too to make sure that proactive messaging works
+
 Instructions for deploying the app to Azure:
 Mac Instructions:
 Run ```bash azure-deploy-simple.sh ``` to deploy container
@@ -47,7 +49,7 @@ Delete local branches: ```git branch -D branch-name```
 In general keep PRs as small as feasible. Minimize commit and branch complexity for everyone's sake.
 
 ## Database
-We host a postgress sql server in our Azure resource group.
+We host a postgres sql server in our Azure resource group.
 Use pgAdmin4 (or other sql client of choice) to connect to the db.
 Credentials can be found in internal docs (ask Rishi) or in the env vars of the web app / app service.
 
