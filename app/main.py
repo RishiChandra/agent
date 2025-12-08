@@ -33,7 +33,7 @@ app = FastAPI()
 @app.get("/healthz")
 def healthz():
     print("/healthz called and accepted")
-    return {"ok": True, "last_updated": "Nov 16 17:34 PST"}
+    return {"ok": True, "last_updated": "Dec 6 4:03 PST"}
 
 
 # ===== Gemini config =====
@@ -178,6 +178,32 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         # Keep the Gemini session alive for the entire WebSocket connection
         async with client.aio.live.connect(model=MODEL, config=CONFIG) as gemini_session:
 
+            async def send_client_content(turns=None, turn_complete=True):
+                """Helper method to send text content to Gemini.
+                
+                Args:
+                    turns: Can be a string (simple text) or a dict with {"role": "user", "parts": [{"text": "..."}]}
+                    turn_complete: Whether to mark the turn as complete
+                """
+                if turns:
+                    try:
+                        # Extract text for logging before conversion
+                        text_to_log = turns if isinstance(turns, str) else turns.get('parts', [{}])[0].get('text', '')
+                        
+                        # If turns is a string, convert it to the proper format
+                        if isinstance(turns, str):
+                            turns = {"role": "user", "parts": [{"text": turns}]}
+                        
+                        # Send text input to Gemini using send_client_content
+                        await gemini_session.send_client_content(
+                            turns=turns,
+                            turn_complete=turn_complete
+                        )
+                        print(f"📤 Sent text to Gemini: {text_to_log}")
+                    except Exception as e:
+                        print(f"Error sending text to Gemini: {e}")
+                        traceback.print_exc()
+
             async def ws_reader():
                 while True:
                     try:
@@ -188,7 +214,25 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         if data.get("interrupt") or (data.get("text") and "stop" in data.get("text", "").lower()):
                             print("✋ Client requested interrupt")
                             await interrupt()  # Call the interrupt function
-                            
+                            continue
+
+                        # Handle text input (supports multiple formats)
+                        text_content = None
+                        turn_complete = True
+                        
+                        if "turns" in data:
+                            text_content = data["turns"]
+                            turn_complete = data.get("turn_complete", True)
+                        elif "text" in data:
+                            text_content = data["text"]
+                            turn_complete = data.get("turn_complete", True)
+                        elif "input_text" in data:
+                            text_content = data["input_text"]
+                            turn_complete = data.get("turn_complete", True)
+                        
+                        if text_content:
+                            await send_client_content(turns=text_content, turn_complete=turn_complete)
+                            continue
 
                         # Primary path: audio
                         if "audio" in data:
@@ -318,7 +362,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             print(f"🤐 INTERRUPTION DETECTED BY SERVER")
                             await interrupt()  # Call the interrupt function like in working example
                             print("🔇 Audio playback interrupted and cleared")
-                            continue
+                            break
                            
                         # Forward audio parts immediately (streaming) - identical to working example
                         if server_content and server_content.model_turn:
