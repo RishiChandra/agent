@@ -30,7 +30,7 @@ Run ```bash azure-deploy-simple.sh ``` to deploy container
 Windows Instructions:
 Ensure you have git bash. All instructions will be assuming you are in bash.
 Ensure you have docker desktop running. Try ```docker ps``` and see that it prints a table (empty is fine)
-Run ```bash azure-deploy-simple.sh ``` to deploy container
+Run ```bash azure-deploy-simple.sh``` to deploy container
 
 ## Git Rules
 Create a new branch: ```git checkout -b <name>```

@@ -166,8 +166,14 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         # Get the database session for the user_id
         #user_id = websocket.user_id
         db_session = get_session(user_id)
+        print(f"🔄 DB SESSION: {db_session}")
         if not db_session:
             db_session = create_session(user_id)
+        else:
+            print(f"🔄 SESSION FOUND FOR USER {user_id}")
+            print(f"🔄 SESSION: {db_session}")
+            update_session_status(user_id, True)
+
         
         # Keep the Gemini session alive for the entire WebSocket connection
         async with client.aio.live.connect(model=MODEL, config=CONFIG) as gemini_session:
@@ -188,7 +194,28 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         if "audio" in data:
                             audio_bytes = base64.b64decode(data["audio"])
                             await audio_queue.put(audio_bytes)
+                    except WebSocketDisconnect:
+                        # Re-raise to be caught by outer handler
+                        raise
                     except Exception as e:
+                        # Check if this is a connection closure
+                        error_str = str(e)
+                        error_repr = repr(e)
+                        # Handle various connection closure indicators:
+                        # - WebSocket close codes like (1000, '')
+                        # - Connection closed/disconnected messages
+                        # - RuntimeError/ConnectionError from websockets library
+                        is_connection_closed = (
+                            "closed" in error_str.lower() or 
+                            "disconnect" in error_str.lower() or 
+                            "(1000" in error_repr or  # Close code 1000 (normal closure)
+                            isinstance(e, (RuntimeError, ConnectionError, OSError))
+                        )
+                        
+                        if is_connection_closed:
+                            print(f"🔄 Connection closed detected: {e}")
+                            raise WebSocketDisconnect()
+                        
                         print(f"Error in ws_reader: {e}")
                         break
 
@@ -317,14 +344,23 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                     print("Session ended unexpectedly")
 
             # Use TaskGroup to manage all the concurrent tasks
-            async with asyncio.TaskGroup() as tg:
-                # Start all tasks within the TaskGroup context
-                tg.create_task(ws_reader())
-                tg.create_task(process_and_send_audio())
-                tg.create_task(receive_and_play())
-                
-                # The TaskGroup will wait for all tasks to complete
-                # This ensures proper cleanup when the WebSocket connection ends
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    # Start all tasks within the TaskGroup context
+                    tg.create_task(ws_reader())
+                    tg.create_task(process_and_send_audio())
+                    tg.create_task(receive_and_play())
+                    
+                    # The TaskGroup will wait for all tasks to complete
+                    # This ensures proper cleanup when the WebSocket connection ends
+            except* Exception as eg:
+                # TaskGroup wraps exceptions in ExceptionGroup
+                # Check if any exception in the group is a WebSocketDisconnect
+                for exc in eg.exceptions:
+                    if isinstance(exc, WebSocketDisconnect):
+                        raise exc
+                # If not, re-raise the exception group
+                raise
             
     except WebSocketDisconnect:
         print("❌ Client disconnected")
@@ -345,7 +381,7 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=8000,
-        log_level="debug",
+        log_level="info",
         ws="websockets",          # ensure the websockets backend
         ws_ping_interval=None,    # completely disable server pings
         ws_ping_timeout=None,      # disable timeout
