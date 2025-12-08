@@ -1,5 +1,6 @@
 {
   "version": "2.0",
+  "language": "python",
   "logging": {
     "applicationInsights": {
       "samplingSettings": {
