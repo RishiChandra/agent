@@ -23,8 +23,6 @@ To run a local websocket server, run ```python main.py```
 
 To test (local vs deployed can be configured in the test), run ```python -m app.test_ws``` from the test directory
 
-Run ```python -m app.test_proactive_messaging``` from the test directory too to make sure that proactive messaging works
-
 Instructions for deploying the app to Azure:
 Mac Instructions:
 Run ```bash azure-deploy-simple.sh ``` to deploy container
@@ -58,6 +56,8 @@ Deploy with ```func azure functionapp publish listener --python``` in listener d
 
 Testing:
 You can quickly create a task with ```python testing/quick_enqueue.py 1```
+You can also test that it activates the mock task reminder too if a session is not active
+
 You can see the current Task Queue for the Service Bus on the Azure Portal:
 <img width="2560" height="1271" alt="screencapture-portal-azure-2025-12-07-17_27_29" src="https://github.com/user-attachments/assets/2d820d6c-1b2e-470c-ae72-aa097f54bb2a" />
 

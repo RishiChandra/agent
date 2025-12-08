@@ -1,28 +1,15 @@
 import asyncio
-import os
-import sys
 import json
 import base64
 from collections import deque
 
-import psycopg2
 import websockets
 import pyaudio
-from dotenv import load_dotenv
 
 # ================================
-# Load .env variables
+# Constants
 # ================================
-load_dotenv()
-
-# ================================
-# Constants (hardcoded user + URL)
-# ================================
-USER_ID = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
-WS_URI = (
-    #f"ws://localhost:8000/ws/{USER_ID}"
-    f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
-)
+# WS_URI is now built dynamically based on user_id parameter
 
 # ===== Audio Config =====
 FORMAT = pyaudio.paInt16
@@ -99,78 +86,6 @@ class AudioManager:
 
 
 # =================================================
-# DATABASE HELPERS
-# =================================================
-
-
-def build_postgres_dsn():
-    host = os.getenv("DB_HOST")
-    port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME")
-    user = os.getenv("DB_USER")
-    password = os.getenv("DB_PASSWORD")
-
-    missing = []
-    for var, val in [
-        ("DB_HOST", host),
-        ("DB_NAME", name),
-        ("DB_USER", user),
-        ("DB_PASSWORD", password),
-    ]:
-        if not val:
-            missing.append(var)
-
-    if missing:
-        print(f"❌ Missing .env variables: {', '.join(missing)}")
-        sys.exit(1)
-
-    # Azure Postgres typically needs sslmode=require
-    return (
-        f"host={host} port={port} dbname={name} "
-        f"user={user} password={password} sslmode=require"
-    )
-
-
-def connect_db(dsn: str):
-    conn = psycopg2.connect(dsn)
-    conn.autocommit = True
-    print("✅ Connected to PostgreSQL")
-    return conn
-
-
-def fetch_is_active_sync(conn, user_id: str) -> bool:
-    """
-    Simple check for is_active in sessions table.
-
-    Expected table schema:
-      sessions(user_id, is_active)
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT is_active
-            FROM sessions
-            WHERE user_id = %s
-            LIMIT 1;
-            """,
-            (user_id,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            # Treat "no row" as inactive
-            return False
-        return bool(row[0])
-
-
-async def check_is_active(conn, user_id: str) -> bool:
-    try:
-        return await asyncio.to_thread(fetch_is_active_sync, conn, user_id)
-    except Exception as e:
-        print(f"Database error: {e}")
-        return False
-
-
-# =================================================
 # WEBSOCKET AUDIO LOOPS
 # =================================================
 
@@ -215,22 +130,32 @@ async def recv_audio(ws, audio_mgr: AudioManager):
             break
 
 
-async def run_websocket_client():
-    """Connect to WebSocket, send initial message, then stream audio."""
+async def run_websocket_client(user_id: str, message: str = "Remind me of my tasks today"):
+    """Connect to WebSocket, send initial message, then stream audio.
+    
+    Args:
+        user_id: The user ID to connect with
+        message: The text message to send to the websocket
+    """
+    # Build WS URI for the user
+    ws_uri = (
+        f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{user_id}"
+    )
+    
     audio_mgr = AudioManager()
 
     try:
         await audio_mgr.init()
 
-        async with websockets.connect(WS_URI) as ws:
-            print(f"🚀 Connected to WebSocket → {WS_URI}")
+        async with websockets.connect(ws_uri) as ws:
+            print(f"🚀 Connected to WebSocket → {ws_uri}")
 
             init_msg = {
-                "turns": "Remind me of my tasks today",
+                "turns": message,
                 "turn_complete": True
             }
             await ws.send(json.dumps(init_msg))
-            print("📨 Initial greeting sent")
+            print(f"📨 Sent message: {message}")
 
             await asyncio.gather(
                 send_audio(ws, audio_mgr),
@@ -239,44 +164,47 @@ async def run_websocket_client():
 
     except Exception as e:
         print(f"WebSocket error: {e}")
+        raise
     finally:
         audio_mgr.cleanup()
 
 
-# =================================================
-# MAIN LOOP (logic: TRUE = defer, FALSE = connect)
-# =================================================
-
-
-async def main_loop():
-    dsn = build_postgres_dsn()
-    conn = connect_db(dsn)
-
+def start_websocket_connection(user_id: str, message: str = "Remind me of my tasks today"):
+    """Synchronous wrapper to start websocket connection.
+    
+    This function can be called from Azure Functions.
+    
+    Args:
+        user_id: The user ID to connect with
+        message: The text message to send to the websocket
+    """
     try:
-        while True:
-            is_active = await check_is_active(conn, USER_ID)
+        asyncio.run(run_websocket_client(user_id, message))
+    except Exception as e:
+        print(f"Error starting websocket connection: {e}")
+        raise
 
-            if is_active:
-                print("⏳ is_active = TRUE → deferring 60s")
-                await asyncio.sleep(60)
-                continue
-            else:
-                print("✅ is_active = FALSE (or no row) → starting WebSocket client...")
-                await run_websocket_client()
 
-            print("ℹ️ WebSocket session ended → recheck in 15s")
-            await asyncio.sleep(15)
-
-    except KeyboardInterrupt:
-        print("\n🛑 Stopping service...")
-    finally:
-        conn.close()
-        print("🔌 PostgreSQL closed")
+# =================================================
+# STANDALONE EXECUTION (for testing)
+# =================================================
 
 
 if __name__ == "__main__":
+    """Standalone execution for testing purposes."""
+    import os
+    from dotenv import load_dotenv
+    
+    load_dotenv()
+    
+    # Default user_id for testing
+    user_id = os.getenv("USER_ID", "2ba330c0-a999-46f8-ba2c-855880bdcf5b")
+    message = "Remind me of my tasks today"
+    
     try:
-        asyncio.run(main_loop())
+        print(f"🧪 Testing websocket connection for user: {user_id}")
+        start_websocket_connection(user_id, message)
     except Exception as e:
         print(f"Unhandled error: {e}")
+        import sys
         sys.exit(1)
