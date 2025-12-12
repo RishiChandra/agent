@@ -43,22 +43,7 @@ def QueueWorker(msg: func.ServiceBusMessage):
                         print(f"Error: {e}")
                         sys.exit(1)
                 else:
-                    # Start websocket connection when session is inactive
-                    return True
-                    print(f"SESSION IS INACTIVE FOR USER {user_id}")
-                    try:
-                        # Extract message from body if it's JSON, otherwise use default
-                        try:
-                            message_data = json.loads(body)
-                            reminder_message = message_data.get("message", "Remind me of my tasks today")
-                        except (json.JSONDecodeError, AttributeError):
-                            reminder_message = "Remind me of my tasks today"
-                        
-                        print(f"🚀 Starting websocket connection for user {user_id} with message: {reminder_message}")
-                        start_websocket_connection(user_id, reminder_message)
-                    except Exception as e:
-                        print(f"❌ Error starting websocket connection: {e}")
-                        # Don't exit, just log the error
+                    # LOGIC TO SEND NOTIFICATION THROUGH AZURE IOT HUB ON ESP32 TO START WEBSOCKET
 
            else:
                 print(f"COULD NOT FIND SESSION FOR USER {user_id}")

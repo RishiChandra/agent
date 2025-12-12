@@ -1,14 +1,17 @@
 import asyncio
-import os
 import sys
+import os
 import json
 import base64
 from collections import deque
 
-import psycopg2
 import websockets
 import pyaudio
 from dotenv import load_dotenv
+
+# Import session management utilities
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+from app.session_management_utils import get_session
 
 # ================================
 # Load .env variables
@@ -103,68 +106,20 @@ class AudioManager:
 # =================================================
 
 
-def build_postgres_dsn():
-    host = os.getenv("DB_HOST")
-    port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME")
-    user = os.getenv("DB_USER")
-    password = os.getenv("DB_PASSWORD")
-
-    missing = []
-    for var, val in [
-        ("DB_HOST", host),
-        ("DB_NAME", name),
-        ("DB_USER", user),
-        ("DB_PASSWORD", password),
-    ]:
-        if not val:
-            missing.append(var)
-
-    if missing:
-        print(f"❌ Missing .env variables: {', '.join(missing)}")
-        sys.exit(1)
-
-    # Azure Postgres typically needs sslmode=require
-    return (
-        f"host={host} port={port} dbname={name} "
-        f"user={user} password={password} sslmode=require"
-    )
-
-
-def connect_db(dsn: str):
-    conn = psycopg2.connect(dsn)
-    conn.autocommit = True
-    print("✅ Connected to PostgreSQL")
-    return conn
-
-
-def fetch_is_active_sync(conn, user_id: str) -> bool:
+async def check_is_active(user_id: str) -> bool:
     """
-    Simple check for is_active in sessions table.
-
-    Expected table schema:
-      sessions(user_id, is_active)
+    Check if a session is active for the given user_id.
+    Uses session_management_utils.get_session() to avoid duplicating logic.
+    
+    Returns:
+        True if session exists and is_active is True, False otherwise
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT is_active
-            FROM sessions
-            WHERE user_id = %s
-            LIMIT 1;
-            """,
-            (user_id,),
-        )
-        row = cur.fetchone()
-        if row is None:
+    try:
+        session = await asyncio.to_thread(get_session, user_id)
+        if session is None:
             # Treat "no row" as inactive
             return False
-        return bool(row[0])
-
-
-async def check_is_active(conn, user_id: str) -> bool:
-    try:
-        return await asyncio.to_thread(fetch_is_active_sync, conn, user_id)
+        return bool(session.get("is_active", False))
     except Exception as e:
         print(f"Database error: {e}")
         return False
@@ -226,7 +181,7 @@ async def run_websocket_client():
             print(f"🚀 Connected to WebSocket → {WS_URI}")
 
             init_msg = {
-                "turns": "Remind me of my tasks today",
+                "turns": "Tell the user that it is time for them to take their medicine right now",
                 "turn_complete": True
             }
             await ws.send(json.dumps(init_msg))
@@ -249,12 +204,9 @@ async def run_websocket_client():
 
 
 async def main_loop():
-    dsn = build_postgres_dsn()
-    conn = connect_db(dsn)
-
     try:
         while True:
-            is_active = await check_is_active(conn, USER_ID)
+            is_active = await check_is_active(USER_ID)
 
             if is_active:
                 print("⏳ is_active = TRUE → deferring 60s")
@@ -269,9 +221,6 @@ async def main_loop():
 
     except KeyboardInterrupt:
         print("\n🛑 Stopping service...")
-    finally:
-        conn.close()
-        print("🔌 PostgreSQL closed")
 
 
 if __name__ == "__main__":
