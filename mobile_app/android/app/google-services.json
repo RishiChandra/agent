@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "519539764670",
+    "project_id": "ai-health-assistant-a3e73",
+    "storage_bucket": "ai-health-assistant-a3e73.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:519539764670:android:23b9dff2b72aeaba4d9def",
+        "android_client_info": {
+          "package_name": "com.example.mobile_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCt4KaMC_jIPpj7CwTWvPIaJUYCs6r6qEw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
