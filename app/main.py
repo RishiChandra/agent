@@ -33,7 +33,7 @@ app = FastAPI()
 @app.get("/healthz")
 def healthz():
     print("/healthz called and accepted")
-    return {"ok": True, "last_updated": "Nov 16 17:34 PST"}
+    return {"ok": True, "last_updated": "Dec 6 4:03 PST"}
 
 
 # ===== Gemini config =====
@@ -178,6 +178,65 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         # Keep the Gemini session alive for the entire WebSocket connection
         async with client.aio.live.connect(model=MODEL, config=CONFIG) as gemini_session:
 
+            async def send_client_content(content=None, mark_turn_complete=True):
+                """Helper method to send text content to Gemini.
+                
+                Args:
+                    content: The message content to send to Gemini. Can be:
+                        - A string (simple text message): "Hello, how are you?"
+                        - A single dict with role and parts: {"role": "user", "parts": [{"text": "Hello"}]}
+                        - A list of dicts for multiple turns: [
+                            {"role": "user", "parts": [{"text": "What's the weather?"}]},
+                            {"role": "model", "parts": [{"text": "I don't have access to weather data."}]},
+                            {"role": "user", "parts": [{"text": "Can you help me find it online?"}]}
+                          ]
+                        Examples:
+                            # Simple string
+                            await send_client_content("What time is it?")
+                            
+                            # Single dict format
+                            await send_client_content({"role": "user", "parts": [{"text": "Tell me a joke"}]})
+                            
+                            # Multiple turns (conversation history)
+                            await send_client_content([
+                                {"role": "user", "parts": [{"text": "My name is Jason"}]},
+                                {"role": "model", "parts": [{"text": "Nice to meet you, Jason!"}]},
+                                {"role": "user", "parts": [{"text": "What did I just tell you my name was?"}]}
+                            ])
+                    
+                    mark_turn_complete: Boolean indicating whether to mark the turn as complete.
+                        When True (default), Gemini will process the message immediately.
+                        When False, allows sending partial content that will be completed later.
+                        Example:
+                            # Send partial message
+                            await send_client_content("This is part one...", mark_turn_complete=False)
+                            await send_client_content("...and this is part two.", mark_turn_complete=True)
+                """
+                if content:
+                    try:
+                        # Extract text for logging before conversion
+                        if isinstance(content, str):
+                            text_to_log = content
+                        elif isinstance(content, list):
+                            # For multiple turns, log the last user message
+                            text_to_log = content[-1].get('parts', [{}])[0].get('text', '') if content else ''
+                        else:
+                            text_to_log = content.get('parts', [{}])[0].get('text', '')
+                        
+                        # If content is a string, convert it to the proper format
+                        if isinstance(content, str):
+                            content = {"role": "user", "parts": [{"text": content}]}
+                        
+                        # Send text input to Gemini using send_client_content
+                        await gemini_session.send_client_content(
+                            turns=content,
+                            turn_complete=mark_turn_complete
+                        )
+                        print(f"📤 Sent text to Gemini: {text_to_log}")
+                    except Exception as e:
+                        print(f"Error sending text to Gemini: {e}")
+                        traceback.print_exc()
+
             async def ws_reader():
                 while True:
                     try:
@@ -188,7 +247,25 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         if data.get("interrupt") or (data.get("text") and "stop" in data.get("text", "").lower()):
                             print("✋ Client requested interrupt")
                             await interrupt()  # Call the interrupt function
-                            
+                            continue
+
+                        # Handle text input (supports multiple formats)
+                        text_content = None
+                        turn_complete = True
+                        
+                        if "turns" in data:
+                            text_content = data["turns"]
+                            turn_complete = data.get("turn_complete", True)
+                        elif "text" in data:
+                            text_content = data["text"]
+                            turn_complete = data.get("turn_complete", True)
+                        elif "input_text" in data:
+                            text_content = data["input_text"]
+                            turn_complete = data.get("turn_complete", True)
+                        
+                        if text_content:
+                            await send_client_content(content=text_content, mark_turn_complete=turn_complete)
+                            continue
 
                         # Primary path: audio
                         if "audio" in data:
@@ -318,7 +395,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             print(f"🤐 INTERRUPTION DETECTED BY SERVER")
                             await interrupt()  # Call the interrupt function like in working example
                             print("🔇 Audio playback interrupted and cleared")
-                            continue
+                            break
                            
                         # Forward audio parts immediately (streaming) - identical to working example
                         if server_content and server_content.model_turn:

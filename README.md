@@ -47,7 +47,7 @@ Delete local branches: ```git branch -D branch-name```
 In general keep PRs as small as feasible. Minimize commit and branch complexity for everyone's sake.
 
 ## Database
-We host a postgress sql server in our Azure resource group.
+We host a postgres sql server in our Azure resource group.
 Use pgAdmin4 (or other sql client of choice) to connect to the db.
 Credentials can be found in internal docs (ask Rishi) or in the env vars of the web app / app service.
 
@@ -56,6 +56,8 @@ Deploy with ```func azure functionapp publish listener --python``` in listener d
 
 Testing:
 You can quickly create a task with ```python testing/quick_enqueue.py 1```
+You can also test the task reminder feature by running  ```python test/app/test_task_reminder.py```, which will start a websocket connection with an initial message if the user is not in session or defer by 1 minute.
+
 You can see the current Task Queue for the Service Bus on the Azure Portal:
 <img width="2560" height="1271" alt="screencapture-portal-azure-2025-12-07-17_27_29" src="https://github.com/user-attachments/assets/2d820d6c-1b2e-470c-ae72-aa097f54bb2a" />
 
