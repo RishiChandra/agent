@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 gunicorn
 python-dotenv
-google-genai
+google-genai<1.50.0
 websockets
 httpx
 requests
