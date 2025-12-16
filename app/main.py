@@ -39,7 +39,7 @@ def healthz():
 # ===== Gemini config =====
 PROJECT_ID = "ai-pin-465902"
 LOCATION = "us-central1"
-MODEL = "gemini-2.0-flash-live-001"
+MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
 
 # ===== Audio Config =====
@@ -317,6 +317,10 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 
             async def receive_and_play():
                 """Continuously receive Gemini responses and relay audio to client (mirrors working example)."""
+                # Track recent output transcriptions to filter out echo/feedback
+                from collections import deque
+                recent_outputs = deque(maxlen=10)  # Keep last 10 output transcriptions
+                
                 while True:
                     input_transcriptions = []
                     output_transcriptions = []
@@ -407,13 +411,41 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         # Handle transcriptions (identical to working example)
                         output_transcription = getattr(response.server_content, "output_transcription", None)
                         if output_transcription and output_transcription.text:
-                            output_transcriptions.append(output_transcription.text)
-                            await websocket.send_text(json.dumps({"output_text": output_transcription.text}))
+                            output_text = output_transcription.text.strip()
+                            output_transcriptions.append(output_text)
+                            recent_outputs.append(output_text.lower())  # Store lowercase for comparison
+                            await websocket.send_text(json.dumps({"output_text": output_text}))
 
                         input_transcription = getattr(response.server_content, "input_transcription", None)
                         if input_transcription and input_transcription.text:
-                            input_transcriptions.append(input_transcription.text)
-                            await websocket.send_text(json.dumps({"input_text": input_transcription.text}))
+                            input_text = input_transcription.text.strip()
+                            
+                            # Filter out input transcriptions that match recent output (prevent echo/feedback)
+                            input_lower = input_text.lower()
+                            is_echo = False
+                            
+                            # Check if input matches any recent output (exact, substring, or significant word overlap)
+                            for recent_output in recent_outputs:
+                                # Check for exact match or substring match
+                                if input_lower == recent_output or input_lower in recent_output or recent_output in input_lower:
+                                    is_echo = True
+                                    break
+                                
+                                # Check for significant word overlap (more than 50% of words match)
+                                input_words = set(input_lower.split())
+                                output_words = set(recent_output.split())
+                                if len(input_words) > 0 and len(output_words) > 0:
+                                    overlap = len(input_words & output_words) / max(len(input_words), len(output_words))
+                                    if overlap > 0.5:
+                                        is_echo = True
+                                        break
+                            
+                            if is_echo:
+                                print(f"🚫 Filtered echo input transcription: '{input_text}' (matches recent output)")
+                                continue
+                            
+                            input_transcriptions.append(input_text)
+                            await websocket.send_text(json.dumps({"input_text": input_text}))
 
                     # This will only print when the session ends (which shouldn't happen in normal operation)
                     print(f"Output transcription: {''.join(output_transcriptions)}")

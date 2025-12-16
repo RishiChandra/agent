@@ -22,6 +22,14 @@ class GeneralThinkingAgentTest(unittest.TestCase):
         # Verify we get a response (should be a string)
         self.assertIsInstance(result, str)
         self.assertGreater(len(result), 0)
+    
+    def test_create_task(self):
+        result = self.agent.think("Create a task to buy groceries tomorrow at 2pm")
+        print(f"Result: {result}")
+
+        # Verify we get a response (should be a string)
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
 
 if __name__ == '__main__':
     unittest.main()
