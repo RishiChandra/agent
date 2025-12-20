@@ -59,3 +59,7 @@ local.settings.json
 # Coverage
 .coverage
 htmlcov/
+
+# Firebase config files (contain sensitive keys)
+mobile_app/android/app/google-services.json
+mobile_app/ios/Runner/GoogleService-Info.plist
