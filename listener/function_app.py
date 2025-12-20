@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timedelta, UTC
 from session_management_utils import get_session
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
+from mock_task_reminder import start_websocket_connection
 
 app = func.FunctionApp()
 connection_string = os.getenv("AZURE_SERVICEBUS_CONNECTION_STRING")
@@ -42,8 +43,7 @@ def QueueWorker(msg: func.ServiceBusMessage):
                         print(f"Error: {e}")
                         sys.exit(1)
                 else:
-                    # JASON ADD MOCK WS FUNCTION HERE
-                    print(f"SESSION IS INACTIVE FOR USER {user_id}")
+                    # LOGIC TO SEND NOTIFICATION THROUGH AZURE IOT HUB ON ESP32 TO START WEBSOCKET
 
            else:
                 print(f"COULD NOT FIND SESSION FOR USER {user_id}")
