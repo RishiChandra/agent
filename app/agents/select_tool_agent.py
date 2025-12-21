@@ -18,7 +18,28 @@ class SelectToolAgent:
         tool_names_list = ", ".join(tool_name_enum)
         
         messages = [
-            {"role": "system", "content": f"Given the chat history {chat_history}, select the most appropriate tool to use from the available tools below. You MUST return one of the tool names exactly as listed: {tool_names_list}. {tool_descriptions}"},
+            {
+                "role": "system",
+                "content": (
+                    "You are a tool selector. "
+                    f"Given the chat history {chat_history}, select the single most appropriate tool "
+                    "to call from the list below.\n\n"
+                    "IMPORTANT BEHAVIOR RULES:\n"
+                    "- Do NOT duplicate work that has already been completed in the chat history.\n"
+                    "- If a user's request appears to have been fully handled by a previous tool call "
+                    "(for example, a task was already created, or tasks were already fetched), "
+                    "do NOT select that tool again just to repeat the same operation.\n"
+                    "- However, if the user is making a NEW request (even if similar to a previous one), "
+                    "you should select the appropriate tool for that NEW request.\n"
+                    "- If the user is asking to CREATE, SCHEDULE, SET, or ADD a task, reminder, or todo item, "
+                    "you MUST select the 'create_tasks_tool' - do NOT use the response-generating tool.\n"
+                    "- Prefer tools that move the conversation forward based on what has already happened.\n"
+                    "- Only use the response-generating tool if the user's latest request is already satisfied "
+                    "by prior tool outputs AND the user is not asking to create a new task.\n\n"
+                    f"You MUST return one of the tool names exactly as listed: {tool_names_list}.\n"
+                    f"{tool_descriptions}"
+                ),
+            },
         ]
 
         selecting_tool = {
