@@ -8,7 +8,7 @@ from ..openai_client import call_openai
 
 class CreateTasksToolAgent:
     name = "create_tasks_tool"
-    description = "Create a new task with a description and time to execute"
+    description = "Create a new task with a description and time to execute. Use this tool at most once for each user instruction unless the user explicitly asks for multiple tasks. You don't want to create more or lesstasks than what the user asks for."
 
     def get_tool_description(self):
         return self.description
@@ -75,7 +75,7 @@ class CreateTasksToolAgent:
             
             return json.dumps({
                 "success": True,
-                "message": f"Task '{task_info}' created successfully",
+                "message": f"Task '{task_info}' created successfully. We don't need another create task tool call for this user instruction unless the user has asked for more tasks than this one you just created.",
                 "task_id": task_id,
                 "task_info": task_info,
                 "status": status,
