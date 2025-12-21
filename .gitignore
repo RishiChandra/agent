@@ -10,7 +10,13 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# Python lib directories (in venv/env, not mobile_app)
+**/venv/lib/
+**/venv/lib64/
+**/env/lib/
+**/env/lib64/
+**/.venv/lib/
+**/.venv/lib64/
 lib64/
 parts/
 sdist/
@@ -59,3 +65,7 @@ local.settings.json
 # Coverage
 .coverage
 htmlcov/
+
+# Firebase config files (contain sensitive keys)
+mobile_app/android/app/google-services.json
+mobile_app/ios/Runner/GoogleService-Info.plist
