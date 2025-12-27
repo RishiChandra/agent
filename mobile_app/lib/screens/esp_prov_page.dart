@@ -31,6 +31,7 @@ class _EspProvPageState extends State<EspProvPage> {
       // Clear local storage
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('is_signed_in', false);
+      await prefs.remove('user_id');
 
       // Navigate to home page
       if (mounted) {

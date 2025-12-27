@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../backend/auth_service.dart';
-import 'esp_prov_page.dart';
+import 'tasks_page.dart';
 import '../utils/design_system.dart';
 import '../utils/widgets/app_button.dart';
 import '../utils/widgets/app_text_input.dart';
@@ -48,15 +48,16 @@ class _SignUpPageState extends State<SignUpPage> {
     });
 
     try {
-      await _authService.signUp(username: _usernameController.text.trim(), password: _passwordController.text, firstName: _firstNameController.text.trim(), lastName: _lastNameController.text.trim());
+      final profile = await _authService.signUp(username: _usernameController.text.trim(), password: _passwordController.text, firstName: _firstNameController.text.trim(), lastName: _lastNameController.text.trim());
 
       // Save to local storage
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('is_signed_in', true);
+      await prefs.setString('user_id', profile.userId);
 
-      // Navigate to bluetooth page
+      // Navigate to tasks page
       if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const EspProvPage()), (route) => false);
+        Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => TasksPage(userId: profile.userId)), (route) => false);
       }
     } catch (e) {
       setState(() {

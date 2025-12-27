@@ -101,6 +101,7 @@ fi
 
 # Set environment variables
 echo "🔧 Setting environment variables..."
+# Quote the connection string to handle semicolons properly
 az containerapp update \
     --name $CONTAINER_APP_NAME \
     --resource-group $RESOURCE_GROUP \
@@ -111,6 +112,7 @@ az containerapp update \
                    "DB_USER=${DB_USER}" \
                    "DB_PASSWORD=${DB_PASSWORD}" \
                    "GOOGLE_API_KEY=${GOOGLE_API_KEY}" \
+                   "AZURE_SERVICEBUS_CONNECTION_STRING=\"${AZURE_SERVICEBUS_CONNECTION_STRING}\"" \
     --output none
 
 # Get the app URL
