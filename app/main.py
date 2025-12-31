@@ -299,7 +299,7 @@ async def enqueue_task_endpoint(request: TaskEnqueueRequest):
 # ===== Gemini config =====
 PROJECT_ID = "ai-pin-465902"
 LOCATION = "us-central1"
-MODEL = "gemini-2.0-flash-live-001"
+MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
 
 # ===== Audio Config =====
@@ -344,7 +344,8 @@ CONFIG = LiveConnectConfig(
         "information before you make a response. If you don't have sufficient information, "
         "think about it first using the think tool, and then use the information returned "
         "by the think tool to provide a helpful response to the user. If you use the Think "
-        "tool, provide a short response to the user such as \"Let me see\" immediately and then wait for the tool to complete. "
+        "tool, provide a short intermediate response to the user such as \"Let me see\" immediately and then wait for the tool to complete."
+        "the short intermediate response should NEVER say that you can't do something as the Think tool will provide that information to you."
         "You also have access to a Google Search tool for information that can be easily found online; use it when appropriate, "
         "but continue to prefer the think tool, especially when you need any personal information about the user."
     ),
@@ -356,6 +357,60 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     await websocket.accept()
     print(f"✅ Client connected with user_id: {user_id}")
     print("🚫 Server WS pings DISABLED")
+
+    # Initialize scratchpad to track session inputs and responses
+    scratchpad = []
+    
+    # Buffers for accumulating audio transcription chunks
+    audio_buffers = {
+        "user": "",
+        "agent": ""
+    }
+
+    def commit_audio_buffer(source):
+        """Commit buffered audio transcription to scratchpad if it has content."""
+        if audio_buffers[source]:
+            add_to_scratchpad(source=source, format="audio", content=audio_buffers[source].strip())
+            audio_buffers[source] = ""
+
+    def add_to_scratchpad(source, format, content=None, name=None, args=None, response=None, call_id=None):
+        """Helper method to add entries to the scratchpad with standardized format.
+        
+        Args:
+            source: "user" or "agent"
+            format: "text", "audio", or "function_call"
+            content: Text or audio content (for text/audio formats)
+            name: Function name (for function_call format)
+            args: Function arguments (for function_call format - call)
+            response: Function response (for function_call format - response)
+            call_id: Function call ID (for function_call format)
+        """
+        entry = {
+            "source": source,
+            "format": format
+        }
+        
+        if format in ["text", "audio"]:
+            if content:
+                entry["content"] = content
+            # For non-audio formats or when committing audio, commit any pending audio buffers
+            if format != "audio":
+                # Commit any pending audio buffers when a different format is added
+                if audio_buffers["user"]:
+                    commit_audio_buffer("user")
+                if audio_buffers["agent"]:
+                    commit_audio_buffer("agent")
+        elif format == "function_call":
+            if name:
+                entry["name"] = name
+            if call_id:
+                entry["call_id"] = call_id
+            if args is not None:
+                entry["args"] = args
+            if response is not None:
+                entry["response"] = response
+        
+        scratchpad.append(entry)
 
     # Queues to mirror the working example
     audio_queue = asyncio.Queue()
@@ -376,7 +431,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 
     async def play_audio():
         """Play all queued audio data (EXACTLY like working example)"""
-        print("🗣️ Gemini talking")
+        #print("🗣️ Gemini talking")
         while audio_playback_queue:
             try:
                 # Check if we've been interrupted
@@ -392,7 +447,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 print(f"Error playing audio: {e}")
                 break
         
-        print("🔇 Audio playback finished")
+        #print("🔇 Audio playback finished")
 
     async def interrupt():
         """Handle interruption by stopping playback and clearing queue (EXACTLY like working example)"""
@@ -524,6 +579,23 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             turn_complete = data.get("turn_complete", True)
                         
                         if text_content:
+                            # Commit any pending audio buffers before adding text input
+                            commit_audio_buffer("user")
+                            commit_audio_buffer("agent")
+                            
+                            # Extract text for scratchpad
+                            if isinstance(text_content, str):
+                                input_text = text_content
+                            elif isinstance(text_content, list):
+                                # For multiple turns, get the last user message
+                                input_text = text_content[-1].get('parts', [{}])[0].get('text', '') if text_content else ''
+                            else:
+                                input_text = text_content.get('parts', [{}])[0].get('text', '')
+                            
+                            # Add to scratchpad
+                            if input_text:
+                                add_to_scratchpad(source="user", format="text", content=input_text)
+                            
                             await send_client_content(content=text_content, mark_turn_complete=turn_complete)
                             continue
 
@@ -577,108 +649,204 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 
             async def receive_and_play():
                 """Continuously receive Gemini responses and relay audio to client (mirrors working example)."""
-                while True:
-                    input_transcriptions = []
-                    output_transcriptions = []
+                # Track recent output transcriptions to filter out echo/feedback
+                from collections import deque
+                recent_outputs = deque(maxlen=10)  # Keep last 10 output transcriptions
+                
+                try:
+                    while True:
+                        input_transcriptions = []
+                        output_transcriptions = []
 
-                    async for response in gemini_session.receive():
-                        # retrieve continuously resumable session ID (identical to working example)
-                        if response.session_resumption_update:
-                            update = response.session_resumption_update
-                            if update.resumable and update.new_handle:
-                                # The handle should be retained and linked to the session.
-                                print(f"new SESSION: {update.new_handle}")
+                        async for response in gemini_session.receive():
+                            # retrieve continuously resumable session ID (identical to working example)
+                            if response.session_resumption_update:
+                                update = response.session_resumption_update
+                                if update.resumable and update.new_handle:
+                                    # The handle should be retained and linked to the session.
+                                    print(f"new SESSION: {update.new_handle}")
 
-                        # Check if the connection will be soon terminated
-                        if response.go_away is not None:
-                            print(response.go_away.time_left)
+                            # Check if the connection will be soon terminated
+                            if response.go_away is not None:
+                                print(response.go_away.time_left)
 
-                        # Handle tool calls (identical to working example)
-                        if response.tool_call:
-                            print(f"📝 Tool call received: {response.tool_call}")
+                            # Handle tool calls (identical to working example)
+                            if response.tool_call:
+                                # Commit any pending audio buffers before handling function calls
+                                commit_audio_buffer("user")
+                                commit_audio_buffer("agent")
+                                
+                                print(f"📝 Tool call received: {response.tool_call}")
 
-                            function_responses = []
+                                function_responses = []
 
-                            for function_call in response.tool_call.function_calls:
-                                name = function_call.name
-                                args = function_call.args
-                                call_id = function_call.id
+                                for function_call in response.tool_call.function_calls:
+                                    name = function_call.name
+                                    args = function_call.args
+                                    call_id = function_call.id
 
-                                # Handle get_memories function
-                                if name == "think_and_repeat_output":
-                                    try:
-                                        # Get user_id (optional)
-                                        user_id = args.get("user_input")
-                                        # Call think_and_repeat_output function
-                                        result = generalThinkingAgent.think(user_id)
-                                        print(f"generalThinkingAgent.think(user_id) {result}")
-                                        return_string = f"{result}."
-                                        function_responses.append(
-                                            {
-                                                "name": name,
-                                                "response": {"result": return_string},
-                                                "id": call_id,
-                                                "scheduling": "WHEN_IDLE"
-                                            }
+                                    # Check if this is a status notification (not a real tool call)
+                                    # Status notifications have 'status' or 'id' in args but no actual function parameters
+                                    if "status" in args or ("id" in args and "user_input" not in args):
+                                        print(f"📋 Status notification received: {args}")
+                                        # Status notifications are informational, not tool calls to execute
+                                        # We don't need to send a response for these
+                                        continue
+
+                                    # Handle think function
+                                    if name == "think_and_repeat_output":
+                                        try:
+                                            # Only process if we have actual user input (not a status notification)
+                                            if "user_input" in args:
+                                                # Get user_id (optional)
+                                                user_id = args.get("user_input")
+                                                # Call think_and_repeat_output function
+                                                result = generalThinkingAgent.think(user_id, scratchpad)
+                                                print(f"generalThinkingAgent.think(user_id) {result}")
+                                                return_string = f"{result}."
+                                                function_responses.append(
+                                                    {
+                                                        "name": name,
+                                                        "response": {"result": return_string},
+                                                        "id": call_id,
+                                                        "scheduling": "WHEN_IDLE"
+                                                    }
+                                                )
+                                            else:
+                                                print(f"Think_and_repeat_output called but 'user_input' not in args: {args}")
+                                        except Exception as e:
+                                            print(f"❌ Error in think_and_repeat_output: {e}")
+                                            traceback.print_exc()
+
+
+                                # Send function responses back to Gemini (only if we have actual responses)
+                                if function_responses:
+                                    print(f"Sending function responses: {function_responses}")
+                                    print(f"function_responses: {function_responses[0]['response']}")
+                                    
+                                    # Add function responses to scratchpad
+                                    for func_response in function_responses:
+                                        add_to_scratchpad(
+                                            source="agent",
+                                            format="function_call",
+                                            name=func_response["name"],
+                                            response=func_response["response"],
+                                            call_id=func_response["id"]
                                         )
-                                    except Exception as e:
-                                        print(f"Error: {e}")
-                                        traceback.print_exc()
+                                    
+                                    # Create proper FunctionResponse objects
+                                    gemini_function_responses = []
+                                    for response in function_responses:
+                                        gemini_response = types.FunctionResponse(
+                                            id=response["id"],
+                                            name=response["name"],
+                                            response=response["response"]
+                                        )
+                                        gemini_function_responses.append(gemini_response)
+                                    
+                                    await gemini_session.send_tool_response(function_responses=gemini_function_responses)
+                                    print("Finished sending function responses")
+                                    continue
 
+                            server_content = response.server_content
 
-                            # Send function responses back to Gemini
-                            if function_responses:
-                                print(f"Sending function responses: {function_responses}")
-                                print(f"function_responses: {function_responses[0]['response']}")
+                            # Handle interruption (EXACTLY like working example)
+                            if (
+                                hasattr(server_content, "interrupted")
+                                and server_content.interrupted
+                            ):
+                                print(f"🤐 INTERRUPTION DETECTED BY SERVER")
+                                await interrupt()  # Call the interrupt function like in working example
+                                print("🔇 Audio playback interrupted and cleared")
+                                break
+                               
+                            # Forward audio parts immediately (streaming) - identical to working example
+                            if server_content and server_content.model_turn:
+                                for part in server_content.model_turn.parts:
+                                    if part.inline_data:
+                                        # Use the add_audio function like in working example
+                                        add_audio(part.inline_data.data)
+
+                            # Handle transcriptions (identical to working example)
+                            output_transcription = getattr(response.server_content, "output_transcription", None)
+                            if output_transcription and output_transcription.text:
+                                # Commit user audio buffer when agent starts responding
+                                commit_audio_buffer("user")
                                 
-                                # Create proper FunctionResponse objects
-                                gemini_function_responses = []
-                                for response in function_responses:
-                                    gemini_response = types.FunctionResponse(
-                                        id=response["id"],
-                                        name=response["name"],
-                                        response=response["response"]
-                                    )
-                                    gemini_function_responses.append(gemini_response)
+                                output_text = output_transcription.text.strip()
+                                output_transcriptions.append(output_text)
+                                recent_outputs.append(output_text.lower())  # Store lowercase for comparison
                                 
-                                await gemini_session.send_tool_response(function_responses=gemini_function_responses)
-                                print("Finished sending function responses")
-                                continue
+                                # Buffer audio transcription chunks instead of adding immediately
+                                if audio_buffers["agent"]:
+                                    audio_buffers["agent"] += " " + output_text
+                                else:
+                                    audio_buffers["agent"] = output_text
+                                
+                                await websocket.send_text(json.dumps({"output_text": output_text}))
 
-                        server_content = response.server_content
-
-                        # Handle interruption (EXACTLY like working example)
-                        if (
-                            hasattr(server_content, "interrupted")
-                            and server_content.interrupted
-                        ):
-                            print(f"🤐 INTERRUPTION DETECTED BY SERVER")
-                            await interrupt()  # Call the interrupt function like in working example
-                            print("🔇 Audio playback interrupted and cleared")
-                            break
-                           
-                        # Forward audio parts immediately (streaming) - identical to working example
-                        if server_content and server_content.model_turn:
-                            for part in server_content.model_turn.parts:
-                                if part.inline_data:
-                                    # Use the add_audio function like in working example
-                                    add_audio(part.inline_data.data)
-
-                        # Handle transcriptions (identical to working example)
-                        output_transcription = getattr(response.server_content, "output_transcription", None)
-                        if output_transcription and output_transcription.text:
-                            output_transcriptions.append(output_transcription.text)
-                            await websocket.send_text(json.dumps({"output_text": output_transcription.text}))
-
-                        input_transcription = getattr(response.server_content, "input_transcription", None)
-                        if input_transcription and input_transcription.text:
-                            input_transcriptions.append(input_transcription.text)
-                            await websocket.send_text(json.dumps({"input_text": input_transcription.text}))
-
-                    # This will only print when the session ends (which shouldn't happen in normal operation)
-                    print(f"Output transcription: {''.join(output_transcriptions)}")
-                    print(f"Input transcription: {''.join(input_transcriptions)}")
-                    print("Session ended unexpectedly")
+                            input_transcription = getattr(response.server_content, "input_transcription", None)
+                            if input_transcription and input_transcription.text:
+                                # Commit agent audio buffer when user starts speaking
+                                commit_audio_buffer("agent")
+                                
+                                input_text = input_transcription.text.strip()
+                                
+                                # Filter out input transcriptions that match recent output (prevent echo/feedback)
+                                input_lower = input_text.lower()
+                                is_echo = False
+                                
+                                # Check if input matches any recent output (exact, substring, or significant word overlap)
+                                for recent_output in recent_outputs:
+                                    # Check for exact match or substring match
+                                    if input_lower == recent_output or input_lower in recent_output or recent_output in input_lower:
+                                        is_echo = True
+                                        break
+                                    
+                                    # Check for significant word overlap (more than 50% of words match)
+                                    input_words = set(input_lower.split())
+                                    output_words = set(recent_output.split())
+                                    if len(input_words) > 0 and len(output_words) > 0:
+                                        overlap = len(input_words & output_words) / max(len(input_words), len(output_words))
+                                        if overlap > 0.5:
+                                            is_echo = True
+                                            break
+                                
+                                if is_echo:
+                                    print(f"🚫 Filtered echo input transcription: '{input_text}' (matches recent output)")
+                                    continue
+                                
+                                input_transcriptions.append(input_text)
+                                
+                                # Buffer audio transcription chunks instead of adding immediately
+                                if audio_buffers["user"]:
+                                    audio_buffers["user"] += " " + input_text
+                                else:
+                                    audio_buffers["user"] = input_text
+                                
+                                await websocket.send_text(json.dumps({"input_text": input_text}))
+                except Exception as e:
+                    # Handle websocket closure and other errors gracefully
+                    error_str = str(e)
+                    if "ConnectionClosed" in error_str or "1011" in error_str or "closed" in error_str.lower():
+                        print(f"🔄 Gemini connection closed: {e}")
+                        # Don't re-raise - let the outer handler deal with it
+                        # The TaskGroup will propagate this appropriately
+                    else:
+                        print(f"Error in receive_and_play: {e}")
+                        traceback.print_exc()
+                        raise
+                except Exception as e:
+                    # Handle websocket closure and other errors gracefully
+                    error_str = str(e)
+                    if "ConnectionClosed" in error_str or "1011" in error_str or "closed" in error_str.lower():
+                        print(f"🔄 Gemini connection closed: {e}")
+                        # Don't re-raise - let the outer handler deal with it
+                        # The TaskGroup will propagate this appropriately
+                    else:
+                        print(f"Error in receive_and_play: {e}")
+                        traceback.print_exc()
+                        raise
 
             # Use TaskGroup to manage all the concurrent tasks
             try:
@@ -701,10 +869,18 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             
     except WebSocketDisconnect:
         print("❌ Client disconnected")
+        # Commit any pending audio buffers before closing
+        commit_audio_buffer("user")
+        commit_audio_buffer("agent")
+        print(f"Scratchpad: {scratchpad}")
         # Update the session status to inactive
         update_session_status(user_id, False)
     except Exception as e:
         print(f"Error in websocket endpoint: {e}")
+        # Commit any pending audio buffers before closing
+        commit_audio_buffer("user")
+        commit_audio_buffer("agent")
+        print(f"Scratchpad: {scratchpad}")
         traceback.print_exc()
         try:
             await websocket.close()

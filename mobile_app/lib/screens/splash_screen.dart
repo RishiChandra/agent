@@ -3,7 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/design_system.dart';
 import '../utils/widgets/app_page_header.dart';
 import 'home_page.dart';
-import 'tasks_page.dart';
+import 'esp_prov_page.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -28,12 +28,11 @@ class _SplashScreenState extends State<SplashScreen> {
     // Check local storage for auth state
     final prefs = await SharedPreferences.getInstance();
     final isSignedIn = prefs.getBool('is_signed_in') ?? false;
-    final userId = prefs.getString('user_id');
 
-    if (isSignedIn && userId != null) {
-      // Navigate to tasks page
+    if (isSignedIn) {
+      // Navigate to bluetooth page
       if (mounted) {
-        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => TasksPage(userId: userId)));
+        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const EspProvPage()));
       }
     } else {
       // Navigate to home page
