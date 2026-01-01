@@ -3,7 +3,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/design_system.dart';
 import '../utils/widgets/app_page_header.dart';
 import 'home_page.dart';
-import 'esp_prov_page.dart';
+import 'tasks_page.dart';
+import '../backend/auth_service.dart';
+import '../backend/database_service.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -13,6 +15,9 @@ class SplashScreen extends StatefulWidget {
 }
 
 class _SplashScreenState extends State<SplashScreen> {
+  final AuthService _authService = AuthService();
+  final DatabaseService _dbService = DatabaseService();
+
   @override
   void initState() {
     super.initState();
@@ -30,9 +35,24 @@ class _SplashScreenState extends State<SplashScreen> {
     final isSignedIn = prefs.getBool('is_signed_in') ?? false;
 
     if (isSignedIn) {
-      // Navigate to bluetooth page
+      // Get current Firebase user
+      final currentUser = _authService.currentUser;
+      if (currentUser != null) {
+        try {
+          // Get user profile from database
+          final profile = await _dbService.getUserByFirebaseUid(currentUser.uid);
+          if (profile != null && mounted) {
+            // Navigate to tasks page
+            Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => TasksPage(userId: profile.userId)));
+            return;
+          }
+        } catch (e) {
+          // If we can't get the profile, fall through to home page
+        }
+      }
+      // If we can't get the user or profile, navigate to home page
       if (mounted) {
-        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const EspProvPage()));
+        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const HomePage()));
       }
     } else {
       // Navigate to home page

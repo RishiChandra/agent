@@ -46,6 +46,8 @@ dependencies:
   
   # Local storage
   shared_preferences: ^2.3.2
+  http: ^1.6.0
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:
