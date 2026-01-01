@@ -5,6 +5,7 @@ from database import execute_update
 from psycopg2.extras import Json
 
 from ..openai_client import call_openai
+from ...task_enqueue import enqueue_task
 
 class CreateTasksToolAgent:
     name = "create_tasks_tool"
@@ -73,14 +74,34 @@ class CreateTasksToolAgent:
             rows_affected = execute_update(query, (task_id, user_id, Json(task_info), status, time_to_execute))
             print(f"Task created. Rows affected: {rows_affected}")
             
-            return json.dumps({
+            # Enqueue task to Service Bus
+            enqueue_result = None
+            try:
+                enqueue_result = enqueue_task(
+                    task_id=task_id,
+                    user_id=user_id,
+                    task_info=task_info,
+                    time_to_execute=time_to_execute.isoformat()
+                )
+                print(f"Task enqueued to Service Bus: {enqueue_result}")
+            except Exception as e:
+                print(f"Warning: Failed to enqueue task to Service Bus: {e}")
+                # Continue even if enqueueing fails - task is already in database
+            
+            response_data = {
                 "success": True,
                 "message": f"Task '{task_info}' created successfully. We don't need another create task tool call for this user instruction unless the user has asked for more tasks than this one you just created.",
                 "task_id": task_id,
                 "task_info": task_info,
                 "status": status,
                 "time_to_execute": time_to_execute.isoformat(),
-            })
+            }
+            
+            # Add enqueue result if available
+            if enqueue_result:
+                response_data["enqueue_result"] = enqueue_result
+            
+            return json.dumps(response_data)
         except Exception as e:
             print(f"Error creating task in database: {e}")
             return json.dumps({
