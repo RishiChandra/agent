@@ -4,6 +4,7 @@ import base64
 import asyncio
 import traceback
 import random
+import time
 from datetime import datetime, timedelta, UTC
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from pydantic import BaseModel
@@ -329,6 +330,26 @@ think_tool = Tool(
     ]
 )
 
+end_conversation_tool = Tool(
+    function_declarations=[
+        FunctionDeclaration(
+            name="end_conversation",
+            behavior="NON_BLOCKING",
+            description="Use this tool when the user indicates they want to end the conversation. This will say goodbye and close the connection.",
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "goodbye_message": {
+                        "type": "STRING",
+                        "description": "A friendly goodbye message to send to the user before ending the conversation.",
+                    }
+                },
+                "required": ["goodbye_message"],
+            },
+        )
+    ]
+)
+
 CONFIG = LiveConnectConfig(
     response_modalities=["AUDIO"],
     output_audio_transcription={},
@@ -347,9 +368,11 @@ CONFIG = LiveConnectConfig(
         "tool, provide a short intermediate response to the user such as \"Let me see\" immediately and then wait for the tool to complete."
         "the short intermediate response should NEVER say that you can't do something as the Think tool will provide that information to you."
         "You also have access to a Google Search tool for information that can be easily found online; use it when appropriate, "
-        "but continue to prefer the think tool, especially when you need any personal information about the user."
+        "but continue to prefer the think tool, especially when you need any personal information about the user. "
+        "If the user indicates they want to end the conversation (e.g., says goodbye, wants to hang up, or indicates they're done), "
+        "use the end_conversation tool to say goodbye and close the connection."
     ),
-   tools=[{"google_search": {}}, think_tool],
+   tools=[{"google_search": {}}, think_tool, end_conversation_tool],
 )
 
 @app.websocket("/ws/{user_id}")
@@ -653,6 +676,10 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 from collections import deque
                 recent_outputs = deque(maxlen=10)  # Keep last 10 output transcriptions
                 
+                # Flag to track if we should close after receiving the goodbye audio
+                should_close_after_audio = False
+                last_audio_received_time = None
+                
                 try:
                     while True:
                         input_transcriptions = []
@@ -718,6 +745,37 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                             print(f"❌ Error in think_and_repeat_output: {e}")
                                             traceback.print_exc()
 
+                                    # Handle end conversation function
+                                    elif name == "end_conversation":
+                                        try:
+                                            goodbye_message = args.get("goodbye_message", "Goodbye! Have a great day!")
+                                            print(f"👋 Ending conversation: {goodbye_message}")
+                                            
+                                            # Send response to Gemini to acknowledge the tool call
+                                            # This will cause Gemini to generate the goodbye audio
+                                            gemini_end_response = types.FunctionResponse(
+                                                id=call_id,
+                                                name=name,
+                                                response={"result": "Conversation ended successfully"}
+                                            )
+                                            await gemini_session.send_tool_response(function_responses=[gemini_end_response])
+                                            print("✅ Sent end_conversation response to Gemini, waiting for goodbye audio...")
+                                            
+                                            # Set flag to close after we receive and send the goodbye audio
+                                            should_close_after_audio = True
+                                            
+                                            # Don't return here - continue in the loop to receive the audio response
+                                            continue
+                                        except Exception as e:
+                                            print(f"❌ Error in end_conversation: {e}")
+                                            traceback.print_exc()
+                                            # Still try to close the connection
+                                            try:
+                                                await websocket.close()
+                                            except Exception:
+                                                pass
+                                            return
+
 
                                 # Send function responses back to Gemini (only if we have actual responses)
                                 if function_responses:
@@ -766,6 +824,52 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                     if part.inline_data:
                                         # Use the add_audio function like in working example
                                         add_audio(part.inline_data.data)
+                                        # Track when we last received audio (for goodbye detection)
+                                        if should_close_after_audio:
+                                            last_audio_received_time = time.time()
+
+                            # Check for turn completion - this indicates Gemini has finished generating the response
+                            turn_complete = False
+                            if server_content and hasattr(server_content, "turn_complete"):
+                                turn_complete = server_content.turn_complete
+                            
+                            # If we're ending the conversation, wait for turn completion and audio playback
+                            if should_close_after_audio:
+                                # Check if turn is complete (either via turn_complete flag or by waiting for no new audio)
+                                current_time = time.time()
+                                
+                                # If turn_complete is True, or if we haven't received audio in 1 second, proceed to close
+                                should_proceed_to_close = False
+                                if turn_complete:
+                                    print("✅ Gemini turn complete")
+                                    should_proceed_to_close = True
+                                elif last_audio_received_time and (current_time - last_audio_received_time) > 1.0:
+                                    print("✅ No new audio received for 1 second, assuming turn complete")
+                                    should_proceed_to_close = True
+                                
+                                if should_proceed_to_close:
+                                    print("🎤 Goodbye turn complete, waiting for audio playback to finish...")
+                                    # Wait for playback queue to be empty and playback task to complete
+                                    max_wait_iterations = 100  # Maximum wait iterations (10 seconds at 0.1s per iteration)
+                                    wait_iterations = 0
+                                    while (audio_playback_queue or (playback_task and not playback_task.done())):
+                                        if wait_iterations >= max_wait_iterations:
+                                            print("⏱️ Timeout waiting for audio playback, closing anyway")
+                                            break
+                                        wait_iterations += 1
+                                        await asyncio.sleep(0.1)
+                                    # Give a small additional delay to ensure audio is fully sent to client
+                                    await asyncio.sleep(1.0)  # Increased delay to ensure audio is fully played
+                                    print("✅ Goodbye audio playback complete, closing connection")
+                                    try:
+                                        await websocket.send_text(json.dumps({
+                                            "end_conversation": True
+                                        }))
+                                    except Exception:
+                                        pass  # Connection might already be closing
+                                    await websocket.close()
+                                    print("✅ WebSocket connection closed")
+                                    return
 
                             # Handle transcriptions (identical to working example)
                             output_transcription = getattr(response.server_content, "output_transcription", None)
