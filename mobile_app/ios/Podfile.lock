@@ -38,6 +38,8 @@ PODS:
   - flutter_esp_ble_prov (0.0.1):
     - ESPProvision
     - Flutter
+  - flutter_timezone (0.0.1):
+    - Flutter
   - GoogleUtilities/AppDelegateSwizzler (8.1.0):
     - GoogleUtilities/Environment
     - GoogleUtilities/Logger
@@ -71,6 +73,7 @@ DEPENDENCIES:
   - firebase_core (from `.symlinks/plugins/firebase_core/ios`)
   - Flutter (from `Flutter`)
   - flutter_esp_ble_prov (from `.symlinks/plugins/flutter_esp_ble_prov/ios`)
+  - flutter_timezone (from `.symlinks/plugins/flutter_timezone/ios`)
   - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
 
 SPEC REPOS:
@@ -97,6 +100,8 @@ EXTERNAL SOURCES:
     :path: Flutter
   flutter_esp_ble_prov:
     :path: ".symlinks/plugins/flutter_esp_ble_prov/ios"
+  flutter_timezone:
+    :path: ".symlinks/plugins/flutter_timezone/ios"
   shared_preferences_foundation:
     :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
 
@@ -113,6 +118,7 @@ SPEC CHECKSUMS:
   FirebaseCoreInternal: 9afa45b1159304c963da48addb78275ef701c6b4
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   flutter_esp_ble_prov: 6cff8544535225431d58e5577706ba2a1a106303
+  flutter_timezone: ee50ce7786b5fde27e2fe5375bbc8c9661ffc13f
   GoogleUtilities: 00c88b9a86066ef77f0da2fab05f65d7768ed8e1
   GTMSessionFetcher: fc75fc972958dceedee61cb662ae1da7a83a91cf
   RecaptchaInterop: 11e0b637842dfb48308d242afc3f448062325aba

@@ -6,15 +6,16 @@ class UserProfile {
   final String lastName;
   final String firebaseUid;
   final String username;
+  final String timezone;
 
-  UserProfile({required this.userId, required this.firstName, required this.lastName, required this.firebaseUid, required this.username});
+  UserProfile({required this.userId, required this.firstName, required this.lastName, required this.firebaseUid, required this.username, required this.timezone});
 
   Map<String, dynamic> toMap() {
-    return {'user_id': userId, 'first_name': firstName, 'last_name': lastName, 'firebase_uid': firebaseUid, 'username': username};
+    return {'user_id': userId, 'first_name': firstName, 'last_name': lastName, 'firebase_uid': firebaseUid, 'username': username, 'timezone': timezone};
   }
 
   factory UserProfile.fromMap(Map<String, dynamic> map) {
-    return UserProfile(userId: map['user_id'] as String, firstName: map['first_name'] as String, lastName: map['last_name'] as String, firebaseUid: map['firebase_uid'] as String, username: map['username'] as String);
+    return UserProfile(userId: map['user_id'] as String, firstName: map['first_name'] as String, lastName: map['last_name'] as String, firebaseUid: map['firebase_uid'] as String, username: map['username'] as String, timezone: map['timezone'] as String);
   }
 }
 
@@ -57,6 +58,7 @@ class DatabaseService {
         last_name TEXT NOT NULL,
         firebase_uid TEXT NOT NULL UNIQUE,
         username TEXT NOT NULL UNIQUE,
+        timezone TEXT NOT NULL DEFAULT 'UTC',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     ''');
@@ -66,21 +68,21 @@ class DatabaseService {
   Future<UserProfile?> getUserByFirebaseUid(String firebaseUid) async {
     try {
       final conn = await _getConnection();
-      final result = await conn.execute(Sql.named('SELECT user_id, first_name, last_name, firebase_uid, username FROM users WHERE firebase_uid = @firebaseUid'), parameters: {'firebaseUid': firebaseUid});
+      final result = await conn.execute(Sql.named('SELECT user_id, first_name, last_name, firebase_uid, username, timezone FROM users WHERE firebase_uid = @firebaseUid'), parameters: {'firebaseUid': firebaseUid});
 
       if (result.isEmpty) {
         return null;
       }
 
       final row = result.first;
-      return UserProfile(userId: row[0] as String, firstName: row[1] as String, lastName: row[2] as String, firebaseUid: row[3] as String, username: row[4] as String);
+      return UserProfile(userId: row[0] as String, firstName: row[1] as String, lastName: row[2] as String, firebaseUid: row[3] as String, username: row[4] as String, timezone: row[5] as String);
     } catch (e) {
       throw 'Database error: $e';
     }
   }
 
   // Create user profile with idempotency check
-  Future<UserProfile> createUserProfile({required String userId, required String firstName, required String lastName, required String firebaseUid, required String username}) async {
+  Future<UserProfile> createUserProfile({required String userId, required String firstName, required String lastName, required String firebaseUid, required String username, required String timezone}) async {
     try {
       final conn = await _getConnection();
 
@@ -93,13 +95,13 @@ class DatabaseService {
       // Insert new user
       await conn.execute(
         Sql.named('''
-        INSERT INTO users (user_id, first_name, last_name, firebase_uid, username)
-        VALUES (@userId, @firstName, @lastName, @firebaseUid, @username)
-      '''),
-        parameters: {'userId': userId, 'firstName': firstName, 'lastName': lastName, 'firebaseUid': firebaseUid, 'username': username},
+          INSERT INTO users (user_id, first_name, last_name, firebase_uid, username, timezone)
+          VALUES (@userId, @firstName, @lastName, @firebaseUid, @username, @timezone)
+        '''),
+        parameters: {'userId': userId, 'firstName': firstName, 'lastName': lastName, 'firebaseUid': firebaseUid, 'username': username, 'timezone': timezone},
       );
 
-      return UserProfile(userId: userId, firstName: firstName, lastName: lastName, firebaseUid: firebaseUid, username: username);
+      return UserProfile(userId: userId, firstName: firstName, lastName: lastName, firebaseUid: firebaseUid, username: username, timezone: timezone);
     } on UniqueViolationException catch (e) {
       // Handle unique constraint violations
       if (e.message.contains('username') || e.constraintName?.contains('username') == true) {

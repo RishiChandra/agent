@@ -21,6 +21,7 @@ from google.genai.types import (
     Tool,
 )
 from session_management_utils import get_session, create_session, update_session_status
+from database import get_user_by_id
 from agents import general_thinking_agent
 from task_crud import (
     get_tasks_by_user_id,
@@ -350,30 +351,71 @@ end_conversation_tool = Tool(
     ]
 )
 
-CONFIG = LiveConnectConfig(
-    response_modalities=["AUDIO"],
-    output_audio_transcription={},
-    input_audio_transcription={},
-    speech_config=SpeechConfig(
-        voice_config=VoiceConfig(
-            prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Puck")
-        )
-    ),
-    #system_instruction="You are a helpful personal assistant, and you are talking to Jason (User ID: itismejy). ",
-    system_instruction=(
-        "You are a helpful assistant. For any user input, you want to have sufficient "
-        "information before you make a response. If you don't have sufficient information, "
-        "think about it first using the think tool, and then use the information returned "
-        "by the think tool to provide a helpful response to the user. If you use the Think "
-        "tool, provide a short intermediate response to the user such as \"Let me see\" immediately and then wait for the tool to complete."
-        "the short intermediate response should NEVER say that you can't do something as the Think tool will provide that information to you."
-        "You also have access to a Google Search tool for information that can be easily found online; use it when appropriate, "
-        "but continue to prefer the think tool, especially when you need any personal information about the user. "
-        "If the user indicates they want to end the conversation (e.g., says goodbye, wants to hang up, or indicates they're done), "
-        "use the end_conversation tool to say goodbye and close the connection."
-    ),
-   tools=[{"google_search": {}}, think_tool, end_conversation_tool],
-)
+def get_live_config(user_info: dict = None) -> LiveConnectConfig:
+    """Generate LiveConnectConfig with user-specific information."""
+    from zoneinfo import ZoneInfo
+    
+    # Extract user info with defaults
+    first_name = user_info.get("first_name", "") if user_info else ""
+    last_name = user_info.get("last_name", "") if user_info else ""
+    timezone = user_info.get("timezone", "UTC") if user_info else "UTC"
+    username = user_info.get("username", "") if user_info else ""
+    
+    # Build user context string
+    user_name = f"{first_name} {last_name}".strip() if first_name or last_name else "the user"
+    
+    # Get current time in user's timezone
+    try:
+        user_tz = ZoneInfo(timezone)
+        current_time = datetime.now(user_tz)
+        current_time_str = current_time.strftime(f"%A, %B %d, %Y at %I:%M %p ({timezone})")
+    except Exception:
+        # Fallback to UTC if timezone is invalid
+        current_time = datetime.now(UTC)
+        current_time_str = current_time.strftime("%A, %B %d, %Y at %I:%M %p (UTC)")
+    
+    return LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        output_audio_transcription={},
+        input_audio_transcription={},
+        speech_config=SpeechConfig(
+            voice_config=VoiceConfig(
+                prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Puck")
+            )
+        ),
+        system_instruction=(
+            f"You are a personal secretary assistant for {user_name}. "
+            f"You have access to their task management system. "
+            f"The current time is {current_time_str}. "
+            f"The user's timezone is {timezone}. When creating or discussing tasks with times, "
+            "use this timezone context to provide relevant time information.\n"
+            "\n\n"
+            "## Your Capabilities\n"
+            "You can help users manage their tasks through the following operations:\n"
+            "- READ: View and list existing tasks\n"
+            "- CREATE: Add new tasks with details like title, description, due date, and priority\n"
+            "- UPDATE: Modify existing tasks\n"
+            "- DELETE: Remove tasks\n"
+            "\n\n"
+            "## Available Tools\n"
+            "1. **think_and_repeat_output**: Your primary tool for task management. Use this for ANY request "
+            "involving tasks (viewing, creating, updating, or deleting). This tool accesses the user's personal "
+            "task database and returns the results.\n"
+            "2. **google_search**: Use for general knowledge questions or information that can be found online "
+            "(news, facts, how-to information). Do NOT use this for personal information or tasks.\n"
+            "3. **end_conversation**: Use when the user wants to end the call (says goodbye, wants to hang up, etc.).\n"
+            "\n\n"
+            "## Important Behavior Guidelines\n"
+            "- When you call the think_and_repeat_output tool, you MUST provide a brief spoken acknowledgment "
+            "to the user while waiting, such as 'Let me check that for you', 'One moment', or 'Looking that up now'.\n"
+            "- NEVER say you cannot do something before calling the think tool. The tool has access to the user's "
+            "personal data and will provide the information you need.\n"
+            "- NEVER claim you don't have access to calendars, tasks, or personal information. You DO have access "
+            "through the think tool.\n"
+            "- After receiving results from the think tool, provide a natural, conversational response with the information.\n"
+        ),
+        tools=[{"google_search": {}}, think_tool, end_conversation_tool],
+    )
 
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
@@ -512,9 +554,15 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             print(f"🔄 SESSION: {db_session}")
             update_session_status(user_id, True)
 
+        # Get user's profile for the system prompt
+        user_info = get_user_by_id(user_id)
+        print(f"👤 User info: {user_info}")
+        
+        # Create config with user's info (name, timezone, etc.)
+        config = get_live_config(user_info)
         
         # Keep the Gemini session alive for the entire WebSocket connection
-        async with client.aio.live.connect(model=MODEL, config=CONFIG) as gemini_session:
+        async with client.aio.live.connect(model=MODEL, config=config) as gemini_session:
 
             async def send_client_content(content=None, mark_turn_complete=True):
                 """Helper method to send text content to Gemini.

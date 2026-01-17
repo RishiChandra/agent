@@ -6,7 +6,7 @@ import '../utils/design_system.dart';
 import '../utils/widgets/app_button.dart';
 import '../utils/widgets/app_error_message.dart';
 import '../backend/auth_service.dart';
-import 'sign_in_page.dart';
+import 'splash_screen.dart';
 import 'esp_prov_page.dart';
 
 class TasksPage extends StatefulWidget {
@@ -84,7 +84,7 @@ class _TasksPageState extends State<TasksPage> {
       await prefs.remove('user_id');
 
       if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const SignInPage()), (route) => false);
+        Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const SplashScreen()), (route) => false);
       }
     } catch (e) {
       if (mounted) {
