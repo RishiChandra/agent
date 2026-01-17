@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:uuid/uuid.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'database_service.dart' show DatabaseService, UserProfile;
 
 class AuthService {
@@ -38,8 +39,11 @@ class AuthService {
         return existing;
       }
 
-      // Step 5: Insert profile into Postgres
-      final profile = await _dbService.createUserProfile(userId: appUuid, firstName: firstName, lastName: lastName, firebaseUid: firebaseUid, username: username);
+      // Step 5: Get user's timezone (IANA format like "America/Los_Angeles")
+      final timezone = await FlutterTimezone.getLocalTimezone();
+
+      // Step 6: Insert profile into Postgres
+      final profile = await _dbService.createUserProfile(userId: appUuid, firstName: firstName, lastName: lastName, firebaseUid: firebaseUid, username: username, timezone: timezone);
 
       return profile;
     } on FirebaseAuthException catch (e) {

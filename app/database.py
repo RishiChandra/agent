@@ -95,3 +95,44 @@ def execute_update(query, params=None):
             cursor.close()
             conn.close()
 
+
+def get_user_timezone(user_id: str) -> str:
+    """
+    Get the timezone for a user.
+    
+    Args:
+        user_id: The user ID to fetch timezone for
+        
+    Returns:
+        The user's timezone string (e.g., 'America/New_York'), or 'UTC' if not found
+    """
+    query = "SELECT timezone FROM users WHERE user_id = %s"
+    results = execute_query(query, (user_id,))
+    
+    if results and len(results) > 0:
+        return results[0].get("timezone", "UTC")
+    
+    return "UTC"
+
+
+def get_user_by_id(user_id: str) -> dict:
+    """
+    Get full user profile by user_id.
+    
+    Args:
+        user_id: The user ID to fetch
+        
+    Returns:
+        Dictionary with user profile data, or None if not found
+    """
+    query = """
+        SELECT user_id, first_name, last_name, firebase_uid, username, timezone, device_prefix
+        FROM users
+        WHERE user_id = %s
+    """
+    results = execute_query(query, (user_id,))
+    
+    if results and len(results) > 0:
+        return results[0]
+    
+    return None
