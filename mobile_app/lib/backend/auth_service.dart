@@ -1,12 +1,15 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:uuid/uuid.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
+import 'package:timezone/timezone.dart' as tz;
+import 'package:timezone/data/latest.dart' as tz_data;
 import 'database_service.dart' show DatabaseService, UserProfile;
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final DatabaseService _dbService = DatabaseService();
   final Uuid _uuid = const Uuid();
+  static bool _tzInitialized = false;
 
   // Get current user
   User? get currentUser => _auth.currentUser;
@@ -39,8 +42,9 @@ class AuthService {
         return existing;
       }
 
-      // Step 5: Get user's timezone (IANA format like "America/Los_Angeles")
-      final timezone = await FlutterTimezone.getLocalTimezone();
+      // Step 5: Get user's timezone (canonical IANA format like "America/Los_Angeles")
+      final rawTimezone = await FlutterTimezone.getLocalTimezone();
+      final timezone = _getCanonicalTimezone(rawTimezone);
 
       // Step 6: Insert profile into Postgres
       final profile = await _dbService.createUserProfile(userId: appUuid, firstName: firstName, lastName: lastName, firebaseUid: firebaseUid, username: username, timezone: timezone);
@@ -148,6 +152,22 @@ class AuthService {
         return 'This operation is not allowed.';
       default:
         return 'An error occurred: ${e.message}';
+    }
+  }
+
+  // Convert any timezone (including legacy aliases) to canonical IANA format
+  String _getCanonicalTimezone(String timezone) {
+    if (!_tzInitialized) {
+      tz_data.initializeTimeZones();
+      _tzInitialized = true;
+    }
+    try {
+      // getLocation resolves aliases to canonical names
+      final location = tz.getLocation(timezone);
+      return location.name;
+    } catch (e) {
+      // If timezone not found, return original
+      return timezone;
     }
   }
 }

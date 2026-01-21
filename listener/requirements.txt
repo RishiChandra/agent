@@ -7,3 +7,5 @@ azure-servicebus  # For quick_enqueue.py testing script
 python-dotenv  # For quick_enqueue.py testing script
 
 psycopg2-binary
+azure-iot-device
+requests

@@ -9,6 +9,4 @@ requests
 psycopg2-binary
 openai
 azure-servicebus
-azure-iot-device
-azure-iot-hub
 dotenv
