@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import sys
 import os
 from database import execute_query
@@ -8,7 +9,7 @@ from ..openai_client import call_openai
 
 class GetTasksToolAgent:
     name = "get_tasks_tool"
-    description = "Get a list of tasks for a given time range"
+    description = "Get a list of tasks for a given time range. Use this tool ONLY for read-only queries like 'What tasks do I have', 'Show me my tasks', 'When do I have X', etc. NEVER use this tool to create tasks."
 
     def get_tool_description(self):
         return self.description
@@ -16,9 +17,9 @@ class GetTasksToolAgent:
     def get_tool_name(self):
         return self.name
 
-    def execute_tool(self, chat_history):
+    def execute_tool(self, chat_history, user_config=None):
         messages = [
-            {"role": "system", "content": f"Given the chat history {chat_history}, the assistant has decided to use the {self.name}"},
+            {"role": "system", "content": f"Given the chat history {chat_history}, and the user config {user_config}, the assistant has decided to use the {self.name}"},
         ]
 
         selecting_tool = {
@@ -53,25 +54,77 @@ class GetTasksToolAgent:
         start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
         end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
 
-        # Hardcoded UID for now
-        user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
+        # Get user_id from user_config
+        user_id = None
+        if user_config and user_config.get("user_info"):
+            user_id = user_config["user_info"].get("user_id")
+        
+        if not user_id:
+            # Fallback to hardcoded UID if not available in config
+            user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
+            print(f"Warning: user_id not found in user_config, using fallback: {user_id}")
 
-        # Execute PostgreSQL query
+        # Ensure times have timezone info - if not, use user's timezone from config
+        if not start_time.tzinfo:
+            if user_config and user_config.get("timezone"):
+                user_tz = ZoneInfo(user_config["timezone"])
+                start_time = start_time.replace(tzinfo=user_tz)
+            else:
+                start_time = start_time.replace(tzinfo=timezone.utc)
+        
+        if not end_time.tzinfo:
+            if user_config and user_config.get("timezone"):
+                user_tz = ZoneInfo(user_config["timezone"])
+                end_time = end_time.replace(tzinfo=user_tz)
+            else:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+
+        # Convert query times to UTC for comparison
+        # psycopg2 returns times as UTC (as seen in terminal output), so we normalize query times to UTC
+        # This ensures timezone-aware comparison works correctly regardless of how times are stored
+        start_time_utc = start_time.astimezone(timezone.utc) if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
+        end_time_utc = end_time.astimezone(timezone.utc) if end_time.tzinfo else end_time.replace(tzinfo=timezone.utc)
+
+        # Execute PostgreSQL query with time range filter
+        # PostgreSQL will handle timezone-aware comparison automatically
         try:
             query = """
                 SELECT * FROM tasks 
                 WHERE user_id = %s
+                AND time_to_execute >= %s
+                AND time_to_execute <= %s
             """
-            tasks = execute_query(query, (user_id,))
+            tasks = execute_query(query, (user_id, start_time_utc, end_time_utc))
             print(f"Tasks: {tasks}")
             
             # Convert datetime objects to ISO format strings for JSON serialization
+            # Also convert UTC times to user's timezone if user_config is provided
             serializable_tasks = []
+            user_tz = None
+            if user_config:
+                user_timezone = user_config.get("timezone", "UTC")
+                try:
+                    user_tz = ZoneInfo(user_timezone)
+                except Exception as e:
+                    print(f"Warning: Failed to get user timezone {user_timezone}: {e}")
+            
             for task in tasks:
                 serializable_task = dict(task)
                 # Convert datetime objects to ISO format strings
                 if 'time_to_execute' in serializable_task and serializable_task['time_to_execute']:
-                    serializable_task['time_to_execute'] = serializable_task['time_to_execute'].isoformat()
+                    time_to_execute = serializable_task['time_to_execute']
+                    # If the time is in UTC and we have user's timezone, convert it
+                    if user_tz and time_to_execute.tzinfo:
+                        # Check if it's UTC (offset is 0 or None for UTC)
+                        offset = time_to_execute.utcoffset()
+                        is_utc = (offset is not None and offset.total_seconds() == 0) or str(time_to_execute.tzinfo) == "UTC"
+                        if is_utc:
+                            # Convert from UTC to user's timezone
+                            time_to_execute = time_to_execute.astimezone(user_tz)
+                        # If it's timezone-naive, assume it's in user's timezone
+                    elif user_tz and time_to_execute.tzinfo is None:
+                        time_to_execute = time_to_execute.replace(tzinfo=user_tz)
+                    serializable_task['time_to_execute'] = time_to_execute.isoformat()
                 serializable_tasks.append(serializable_task)
             
             return json.dumps({
