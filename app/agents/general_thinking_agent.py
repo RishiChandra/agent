@@ -53,6 +53,19 @@ class GeneralThinkingAgent:
         
         return has_double_spaces or has_single_letter_words or has_spaces_in_words or has_spaces_around_punctuation
 
+    def _normalize_text(self, text):
+        """Normalize text for comparison by lowercasing and removing extra whitespace.
+        
+        Args:
+            text: The text to normalize
+            
+        Returns:
+            str: Normalized text (lowercase, single spaces, trimmed)
+        """
+        if not text:
+            return ""
+        return " ".join(text.lower().strip().split())
+    
     def _should_skip_fragmented_entry(self, entry_content, final_user_input):
         """Determine if a scratchpad entry should be skipped because it's a fragmented transcription.
         
@@ -70,8 +83,8 @@ class GeneralThinkingAgent:
             return False
         
         # Normalize for comparison (lowercase, remove extra spaces)
-        entry_normalized = " ".join(entry_content.lower().split())
-        final_normalized = " ".join(final_user_input.lower().split())
+        entry_normalized = self._normalize_text(entry_content)
+        final_normalized = self._normalize_text(final_user_input)
         
         if not entry_normalized or not final_normalized:
             return False
@@ -99,12 +112,50 @@ class GeneralThinkingAgent:
         
         return False
 
-    def think(self, user_input, scratchpad):
+    def think(self, user_input, scratchpad, user_config=None):
         print(f"🤔 Thinking about user input: {user_input}")
         print(f"📋 Scratchpad provided: {scratchpad is not None}, length: {len(scratchpad) if scratchpad else 0}")
         
         # Initialize chat history with scratchpad entries
         chat_history = []
+        
+        # Normalize current user input for duplicate detection
+        normalized_current = self._normalize_text(user_input)
+        
+        # Check if this exact input was already processed (to prevent infinite loops)
+        if scratchpad:
+            # Check ALL instances of this user input in the scratchpad, not just the most recent
+            # If any instance has a response after it, we should skip processing
+            for i, entry in enumerate(scratchpad):
+                if entry.get("format") in ["text", "audio"] and entry.get("source") == "user" and entry.get("content"):
+                    entry_content = entry["content"]
+                    normalized_entry = self._normalize_text(entry_content)
+                    if normalized_current == normalized_entry:
+                        # Check if there's already a completed response after this user input
+                        # Look ahead in scratchpad to see if this was already processed
+                        for later_entry in scratchpad[i + 1:]:
+                            # Check for function_call response (definite completion)
+                            if (later_entry.get("format") == "function_call" and 
+                                later_entry.get("source") == "agent" and 
+                                later_entry.get("response") and 
+                                later_entry.get("response").get("result")):
+                                print(f"⚠️ Duplicate user input detected (already processed with function_call), skipping: {user_input[:50]}...")
+                                return "This request has already been processed. Please check the previous response."
+                            # Check for assistant responses that indicate completion (not just acknowledgments)
+                            if (later_entry.get("format") in ["text", "audio"] and 
+                                later_entry.get("source") == "agent" and 
+                                later_entry.get("content")):
+                                content = later_entry.get("content", "")
+                                # Skip if it's just a brief acknowledgment (like "Let me check", "One moment")
+                                acknowledgment_phrases = ["let me check", "one moment", "looking", "checking"]
+                                is_acknowledgment = any(phrase in content.lower() for phrase in acknowledgment_phrases) and len(content) < 50
+                                # If it's a substantial response (not just an acknowledgment), it was already processed
+                                if not is_acknowledgment and len(content) > 20:
+                                    print(f"⚠️ Duplicate user input detected (already processed with assistant response), skipping: {user_input[:50]}...")
+                                    return "This request has already been processed. Please check the previous response."
+                            # If we encounter another user input before finding a response, stop checking this instance
+                            if later_entry.get("format") in ["text", "audio"] and later_entry.get("source") == "user":
+                                break
         
         # Convert scratchpad entries to chat history format if scratchpad is provided
         if scratchpad:
@@ -172,10 +223,38 @@ class GeneralThinkingAgent:
         
         # Extract tool name from the response
         try:
-            tool_call = selected_tool_response.choices[0].message.tool_calls[0]
-            print(f"Tool call function name: {tool_call.function.name}")
-            print(f"Tool call arguments: {tool_call.function.arguments}")
-            selected_tool_name = json.loads(tool_call.function.arguments)["tool_name"]
+            tool_calls = selected_tool_response.choices[0].message.tool_calls
+            # Process all tool calls if multiple are returned
+            if len(tool_calls) > 1:
+                print(f"⚠️ Multiple tool calls detected ({len(tool_calls)}). Processing all of them.")
+                # Process all tool calls of the same type sequentially, updating chat_history after each
+                for idx, tool_call in enumerate(tool_calls):
+                    tool_name = json.loads(tool_call.function.arguments)["tool_name"]
+                    if tool_name not in self.tool_agents:
+                        print(f"⚠️ Skipping invalid tool '{tool_name}' in multi-call response")
+                        continue
+                    tool = self.tool_agents[tool_name]
+                    print(f"Processing tool call {idx + 1}/{len(tool_calls)}: {tool_name}")
+                    # Use updated chat_history so subsequent calls see previous results
+                    tool_response = tool.execute_tool(chat_history, user_config)
+                    print(f"Tool response {idx + 1}: {tool_response}")
+                    # Immediately update chat_history so next iteration sees this result
+                    chat_history.append({"role": "assistant", "name": tool.get_tool_name(), "content": tool_response})
+                    total_tool_calls += 1
+                # After processing all, get next tool selection
+                selected_tool_response = select_tool_agent.select_tool(chat_history)
+                print(f"Selected tool response (after multi-call): {selected_tool_response}")
+                # Validate and extract next tool name
+                if not selected_tool_response.choices or not selected_tool_response.choices[0].message.tool_calls:
+                    print(f"Error: No tool_calls in response after multi-call. Response structure: {selected_tool_response}")
+                    raise ValueError(f"No tool_calls found in response after processing multiple calls.")
+                tool_call = selected_tool_response.choices[0].message.tool_calls[0]
+                selected_tool_name = json.loads(tool_call.function.arguments)["tool_name"]
+            else:
+                tool_call = tool_calls[0]
+                print(f"Tool call function name: {tool_call.function.name}")
+                print(f"Tool call arguments: {tool_call.function.arguments}")
+                selected_tool_name = json.loads(tool_call.function.arguments)["tool_name"]
         except (KeyError, json.JSONDecodeError, AttributeError) as e:
             print(f"Error parsing tool call: {e}")
             print(f"Tool call structure: {tool_call if 'tool_call' in locals() else 'N/A'}")
@@ -210,12 +289,27 @@ class GeneralThinkingAgent:
                 consecutive_same_tool_count = 1
                 previous_tool_name = selected_tool_name
             
-            tool_response = selected_tool.execute_tool(chat_history)
+            tool_response = selected_tool.execute_tool(chat_history, user_config)
             print(f"Tool response: {tool_response}")
             total_tool_calls += 1
 
             chat_history.append({"role": "assistant", "name": selected_tool.get_tool_name(), "content": tool_response})
             print(f"Chat history: {chat_history}")
+
+            # Deterministic short-circuit: if we just ran create_tasks_tool and it either
+            # (a) succeeded, or (b) reported that the time is invalid / all tasks are created,
+            # then we should NOT call create_tasks_tool again for the same user message.
+            if selected_tool_name == "create_tasks_tool":
+                try:
+                    parsed = json.loads(tool_response) if isinstance(tool_response, str) else tool_response
+                    status = (parsed or {}).get("status")
+                    success = (parsed or {}).get("success")
+                    if success is True or status in {"all_tasks_created", "invalid_time"}:
+                        selected_tool_name = "generate_response_tool"
+                        selected_tool = self.tool_agents[selected_tool_name]
+                        break
+                except Exception as e:
+                    print(f"Warning: Failed to parse create_tasks_tool response for short-circuit: {e}")
 
             # Get next tool selection
             selected_tool_response = select_tool_agent.select_tool(chat_history)
@@ -228,10 +322,38 @@ class GeneralThinkingAgent:
             
             # Extract tool name from the response
             try:
-                tool_call = selected_tool_response.choices[0].message.tool_calls[0]
-                print(f"Tool call function name: {tool_call.function.name}")
-                print(f"Tool call arguments: {tool_call.function.arguments}")
-                selected_tool_name = json.loads(tool_call.function.arguments)["tool_name"]
+                tool_calls = selected_tool_response.choices[0].message.tool_calls
+                # Process all tool calls if multiple are returned
+                if len(tool_calls) > 1:
+                    print(f"⚠️ Multiple tool calls detected ({len(tool_calls)}) in loop. Processing all of them.")
+                    # Process all tool calls of the same type sequentially, updating chat_history after each
+                    for idx, tool_call in enumerate(tool_calls):
+                        tool_name = json.loads(tool_call.function.arguments)["tool_name"]
+                        if tool_name not in self.tool_agents:
+                            print(f"⚠️ Skipping invalid tool '{tool_name}' in multi-call response")
+                            continue
+                        tool = self.tool_agents[tool_name]
+                        print(f"Processing tool call {idx + 1}/{len(tool_calls)}: {tool_name}")
+                        # Use updated chat_history so subsequent calls see previous results
+                        tool_response = tool.execute_tool(chat_history, user_config)
+                        print(f"Tool response {idx + 1}: {tool_response}")
+                        # Immediately update chat_history so next iteration sees this result
+                        chat_history.append({"role": "assistant", "name": tool.get_tool_name(), "content": tool_response})
+                        total_tool_calls += 1
+                    # After processing all, get next tool selection
+                    selected_tool_response = select_tool_agent.select_tool(chat_history)
+                    print(f"Selected tool response (after multi-call loop): {selected_tool_response}")
+                    # Validate and extract next tool name
+                    if not selected_tool_response.choices or not selected_tool_response.choices[0].message.tool_calls:
+                        print(f"Error: No tool_calls in response after multi-call loop. Response structure: {selected_tool_response}")
+                        raise ValueError(f"No tool_calls found in response after processing multiple calls in loop.")
+                    tool_call = selected_tool_response.choices[0].message.tool_calls[0]
+                    selected_tool_name = json.loads(tool_call.function.arguments)["tool_name"]
+                else:
+                    tool_call = tool_calls[0]
+                    print(f"Tool call function name: {tool_call.function.name}")
+                    print(f"Tool call arguments: {tool_call.function.arguments}")
+                    selected_tool_name = json.loads(tool_call.function.arguments)["tool_name"]
             except (KeyError, json.JSONDecodeError, AttributeError) as e:
                 print(f"Error parsing tool call: {e}")
                 print(f"Tool call structure: {tool_call if 'tool_call' in locals() else 'N/A'}")
@@ -246,5 +368,9 @@ class GeneralThinkingAgent:
             print(f"Selected tool: {selected_tool}")
 
         # Final tool call will be generate response
-        response = selected_tool.execute_tool(chat_history)
-        return response.choices[0].message.content
+        response = selected_tool.execute_tool(chat_history, user_config)
+        # generate_response_tool returns a string directly, other tools return ChatCompletion objects
+        if isinstance(response, str):
+            return response
+        else:
+            return response.choices[0].message.content

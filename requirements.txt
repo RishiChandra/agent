@@ -9,3 +9,4 @@ requests
 psycopg2-binary
 openai
 azure-servicebus
+tzdata

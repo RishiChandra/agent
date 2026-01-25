@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timedelta, UTC
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, TypedDict
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -31,6 +31,7 @@ from task_crud import (
     delete_task
 )
 from task_enqueue import enqueue_task as enqueue_task_to_service_bus
+from zoneinfo import ZoneInfo
 
 # Instantiate the general thinking agent
 generalThinkingAgent = general_thinking_agent.GeneralThinkingAgent()
@@ -139,8 +140,8 @@ async def create_task_endpoint(request: TaskCreateRequest):
         Created task dictionary
     """
     try:
-        # Convert time_to_execute to UTC if timezone info is provided
-        time_to_execute_utc = request.time_to_execute
+        # Ensure time_to_execute has the correct timezone (user's timezone, not UTC)
+        time_to_execute_final = request.time_to_execute
         if request.time_to_execute and request.timezone_offset is not None:
             try:
                 from datetime import timezone, timedelta
@@ -152,11 +153,15 @@ async def create_task_endpoint(request: TaskCreateRequest):
                     # Create timezone from offset
                     tz = timezone(timedelta(hours=request.timezone_offset))
                     dt = dt.replace(tzinfo=tz)
-                # Convert to UTC (even if already timezone-aware, ensure it's UTC)
-                dt_utc = dt.astimezone(UTC)
-                time_to_execute_utc = dt_utc.isoformat().replace('+00:00', 'Z')
+                # If it's in UTC, convert to user's timezone (don't store in UTC)
+                elif dt.tzinfo == UTC or str(dt.tzinfo) == "UTC":
+                    # Convert from UTC to user's timezone
+                    user_tz = timezone(timedelta(hours=request.timezone_offset))
+                    dt = dt.astimezone(user_tz)
+                # Keep the timezone as-is (respect user's timezone)
+                time_to_execute_final = dt.isoformat()
             except Exception as e:
-                print(f"Warning: Failed to convert timezone for time_to_execute: {e}")
+                print(f"Warning: Failed to set timezone for time_to_execute: {e}")
                 # Fall back to original value
         
         # Create task in database (with optional enqueue)
@@ -164,7 +169,7 @@ async def create_task_endpoint(request: TaskCreateRequest):
             user_id=request.user_id,
             task_info=request.task_info,
             status=request.status,
-            time_to_execute=time_to_execute_utc,
+            time_to_execute=time_to_execute_final,
             enqueue=request.enqueue if request.enqueue is not None else True
         )
         return task
@@ -197,8 +202,8 @@ async def update_task_endpoint(user_id: str, task_id: str, request: TaskUpdateRe
         if existing_task["user_id"] != user_id:
             raise HTTPException(status_code=403, detail="Task does not belong to this user")
         
-        # Convert time_to_execute to UTC if timezone info is provided
-        time_to_execute_utc = request.time_to_execute
+        # Ensure time_to_execute has the correct timezone (user's timezone, not UTC)
+        time_to_execute_final = request.time_to_execute
         if request.time_to_execute and request.timezone_offset is not None:
             try:
                 from datetime import timezone, timedelta
@@ -210,11 +215,15 @@ async def update_task_endpoint(user_id: str, task_id: str, request: TaskUpdateRe
                     # Create timezone from offset
                     tz = timezone(timedelta(hours=request.timezone_offset))
                     dt = dt.replace(tzinfo=tz)
-                # Convert to UTC (even if already timezone-aware, ensure it's UTC)
-                dt_utc = dt.astimezone(UTC)
-                time_to_execute_utc = dt_utc.isoformat().replace('+00:00', 'Z')
+                # If it's in UTC, convert to user's timezone (don't store in UTC)
+                elif dt.tzinfo == UTC or str(dt.tzinfo) == "UTC":
+                    # Convert from UTC to user's timezone
+                    user_tz = timezone(timedelta(hours=request.timezone_offset))
+                    dt = dt.astimezone(user_tz)
+                # Keep the timezone as-is (respect user's timezone)
+                time_to_execute_final = dt.isoformat()
             except Exception as e:
-                print(f"Warning: Failed to convert timezone for time_to_execute: {e}")
+                print(f"Warning: Failed to set timezone for time_to_execute: {e}")
                 # Fall back to original value
         
         # Update task
@@ -222,7 +231,7 @@ async def update_task_endpoint(user_id: str, task_id: str, request: TaskUpdateRe
             task_id=task_id,
             task_info=request.task_info,
             status=request.status,
-            time_to_execute=time_to_execute_utc
+            time_to_execute=time_to_execute_final
         )
         
         return task
@@ -316,13 +325,17 @@ think_tool = Tool(
         FunctionDeclaration(
             name="think_and_repeat_output",
             behavior="NON_BLOCKING",
-            description="Think about the user input and return the thinking results. Use this information to provide a helpful response.",
+            description=(
+                "Think about the user input and return the thinking results. Use this information to provide a helpful response. "
+                "IMPORTANT: Only call this function ONCE per unique user input. If you see a response indicating the request was already processed, "
+                "do NOT call this function again for that same input. Move on to generating your audio response instead."
+            ),
             parameters={
                 "type": "OBJECT",
                 "properties": {
                     "user_input": {
                         "type": "STRING",
-                        "description": "The user input to think about. This should be the exact user input that was just said.",
+                        "description": "The user input to think about. This should be the exact user input that was just said. Only call this function once per unique input.",
                     }
                 },
                 "required": ["user_input"],
@@ -351,29 +364,21 @@ end_conversation_tool = Tool(
     ]
 )
 
-def get_live_config(user_info: dict = None) -> LiveConnectConfig:
+class UserConfigData(TypedDict):
+    """Data structure for user config parameters."""
+    user_info: Optional[dict]
+    user_name: str
+    current_time_str: str
+    current_date_str: str
+    timezone: str
+
+def get_live_config(config_data: UserConfigData) -> LiveConnectConfig:
     """Generate LiveConnectConfig with user-specific information."""
-    from zoneinfo import ZoneInfo
-    
-    # Extract user info with defaults
-    first_name = user_info.get("first_name", "") if user_info else ""
-    last_name = user_info.get("last_name", "") if user_info else ""
-    timezone = user_info.get("timezone", "UTC") if user_info else "UTC"
-    username = user_info.get("username", "") if user_info else ""
-    
-    # Build user context string
-    user_name = f"{first_name} {last_name}".strip() if first_name or last_name else "the user"
-    
-    # Get current time in user's timezone
-    try:
-        user_tz = ZoneInfo(timezone)
-        current_time = datetime.now(user_tz)
-        current_time_str = current_time.strftime(f"%A, %B %d, %Y at %I:%M %p ({timezone})")
-    except Exception:
-        # Fallback to UTC if timezone is invalid
-        current_time = datetime.now(UTC)
-        current_time_str = current_time.strftime("%A, %B %d, %Y at %I:%M %p (UTC)")
-    
+    user_name = config_data["user_name"]
+    current_time_str = config_data["current_time_str"]
+    current_date_str = config_data["current_date_str"]
+    timezone = config_data["timezone"]
+
     return LiveConnectConfig(
         response_modalities=["AUDIO"],
         output_audio_transcription={},
@@ -387,20 +392,19 @@ def get_live_config(user_info: dict = None) -> LiveConnectConfig:
             f"You are a personal secretary assistant for {user_name}. "
             f"You have access to their task management system. "
             f"The current time is {current_time_str}. "
+            f"The current date is {current_date_str}. "
             f"The user's timezone is {timezone}. When creating or discussing tasks with times, "
             "use this timezone context to provide relevant time information.\n"
             "\n\n"
-            "## Your Capabilities\n"
-            "You can help users manage their tasks through the following operations:\n"
-            "- READ: View and list existing tasks\n"
-            "- CREATE: Add new tasks with details like title, description, due date, and priority\n"
-            "- UPDATE: Modify existing tasks\n"
-            "- DELETE: Remove tasks\n"
-            "\n\n"
+            "## CRITICAL: Function Call Rules\n"
+            "- NEVER call the same function multiple times with the same input. Each unique user request should only trigger ONE function call.\n"
+            "- If you see a function response indicating '[COMPLETED]' or 'already processed', that means the work is done. Do NOT call the function again.\n"
+            "- After receiving a function response, generate your audio response to the user. Do NOT call the function again.\n"
+            "\n\n"           
             "## Available Tools\n"
             "1. **think_and_repeat_output**: Your primary tool for task management. Use this for ANY request "
             "involving tasks (viewing, creating, updating, or deleting). This tool accesses the user's personal "
-            "task database and returns the results.\n"
+            "task database and returns the results. Call this ONCE per unique user input, then generate your audio response.\n"
             "2. **google_search**: Use for general knowledge questions or information that can be found online "
             "(news, facts, how-to information). Do NOT use this for personal information or tasks.\n"
             "3. **end_conversation**: Use when the user wants to end the call (says goodbye, wants to hang up, etc.).\n"
@@ -412,7 +416,23 @@ def get_live_config(user_info: dict = None) -> LiveConnectConfig:
             "personal data and will provide the information you need.\n"
             "- NEVER claim you don't have access to calendars, tasks, or personal information. You DO have access "
             "through the think tool.\n"
-            "- After receiving results from the think tool, provide a natural, conversational response with the information.\n"
+            "- CRITICAL ANTI-HALLUCINATION RULE: After receiving results from ANY TOOL, you MUST base your response " 
+            "EXCLUSIVELY and STRICTLY on the information provided in the tool's response. You are FORBIDDEN from making up, " 
+            "inventing, adding, or mentioning any tasks, events, meetings, deadlines, or any other information that is NOT explicitly " 
+            "mentioned in the tool response. If the tool response contains task data, you MUST use ONLY that exact data - " 
+            "do NOT add, infer, or create additional tasks or details that weren't in the response.\n"
+            "- MANDATORY FUNCTION RESPONSE USAGE: When the function response contains a list of tasks (e.g., 'Tomorrow, you have the following tasks: 1. Eat breakfast... 2. Pack my lunch...'), " 
+            "you MUST repeat that EXACT information in your audio response. You MUST NOT say 'I don't have any tasks', 'no tasks', 'unable to get tasks', or any variation that contradicts the function response. " 
+            "The function response is the AUTHORITATIVE source - if it says there are tasks, there ARE tasks. If it says there are no tasks, then say there are no tasks. " 
+            "NEVER contradict the function response.\n"
+            "- ZERO TOLERANCE FOR HALLUCINATION: If the tool response says 'take my medicine' and 'brush my teeth', " 
+            "you MUST ONLY mention those exact tasks. You MUST NOT mention ANY other tasks that are not in the tool response. " 
+            "You MUST NOT say there are no tasks if the tool response lists tasks. This is a critical error that " 
+            "must be avoided at all costs.\n"
+            "- Provide a natural, conversational response using EXCLUSIVELY the information from the tool response. " 
+            "If the tool response lists specific tasks, repeat ONLY those tasks. Do not add examples, suggestions, " 
+            "or any other tasks that weren't explicitly returned by the tool. If the tool response says 'you have X tasks', " 
+            "you MUST say the user has those tasks - do NOT contradict the tool response.\n"
         ),
         tools=[{"google_search": {}}, think_tool, end_conversation_tool],
     )
@@ -431,6 +451,14 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         "user": "",
         "agent": ""
     }
+    # Track user inputs that have already been processed by the think tool to avoid loops
+    processed_tool_inputs = set()
+
+    def _normalize_text(text: str) -> str:
+        """Lowercase and collapse whitespace for stable comparisons."""
+        if not isinstance(text, str):
+            return ""
+        return " ".join(text.lower().strip().split())
 
     def commit_audio_buffer(source):
         """Commit buffered audio transcription to scratchpad if it has content."""
@@ -559,7 +587,38 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         print(f"👤 User info: {user_info}")
         
         # Create config with user's info (name, timezone, etc.)
-        config = get_live_config(user_info)
+        # Extract user info with defaults
+        first_name = user_info.get("first_name", "") if user_info else ""
+        last_name = user_info.get("last_name", "") if user_info else ""
+        timezone = user_info.get("timezone", "UTC") if user_info else "UTC"
+        username = user_info.get("username", "") if user_info else ""
+        
+        # Build user context string
+        user_name = f"{first_name} {last_name}".strip() if first_name or last_name else "the user"
+        
+        # Get current time in user's timezone
+        try:
+            user_tz = ZoneInfo(timezone)
+            current_time = datetime.now(user_tz)
+            current_time_str = current_time.strftime(f"%A, %B %d, %Y at %I:%M %p ({timezone})")
+            current_date_str = current_time.strftime("%A, %B %d, %Y")
+        except Exception:
+            # Fallback to UTC if timezone is invalid
+            current_time = datetime.now(UTC)
+            current_time_str = current_time.strftime("%A, %B %d, %Y at %I:%M %p (UTC)")
+            current_date_str = current_time.strftime("%A, %B %d, %Y")
+        
+        # Create config data structure
+        user_config: UserConfigData = {
+            "user_info": user_info,
+            "user_name": user_name,
+            "current_time_str": current_time_str,
+            "current_date_str": current_date_str,
+            "timezone": timezone
+        }
+        
+        config = get_live_config(user_config)
+        print(f"🔄 User config: {user_config}")
         
         # Keep the Gemini session alive for the entire WebSocket connection
         async with client.aio.live.connect(model=MODEL, config=config) as gemini_session:
@@ -774,19 +833,37 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                             # Only process if we have actual user input (not a status notification)
                                             if "user_input" in args:
                                                 # Get user_id (optional)
-                                                user_id = args.get("user_input")
-                                                # Call think_and_repeat_output function
-                                                result = generalThinkingAgent.think(user_id, scratchpad)
-                                                print(f"generalThinkingAgent.think(user_id) {result}")
-                                                return_string = f"{result}."
-                                                function_responses.append(
-                                                    {
-                                                        "name": name,
-                                                        "response": {"result": return_string},
-                                                        "id": call_id,
-                                                        "scheduling": "WHEN_IDLE"
-                                                    }
-                                                )
+                                                user_input = args.get("user_input")
+                                                normalized_input = _normalize_text(user_input)
+
+                                                # Skip duplicate tool calls for the same user input within this session
+                                                if normalized_input in processed_tool_inputs:
+                                                    print(f"⚠️ Duplicate think_and_repeat_output for input '{user_input}', skipping execution.")
+                                                    # Return a clear message that the work is complete and no further action is needed
+                                                    function_responses.append(
+                                                        {
+                                                            "name": name,
+                                                            "response": {"result": "[COMPLETED] This request was already fully processed and completed. No further action needed. The task has been created and confirmed. Do not call this function again for this input."},
+                                                            "id": call_id,
+                                                            "scheduling": "WHEN_IDLE"
+                                                        }
+                                                    )
+                                                    # Continue to next iteration to avoid processing this duplicate
+                                                    continue
+                                                else:
+                                                    processed_tool_inputs.add(normalized_input)
+                                                    # Call think_and_repeat_output function
+                                                    result = generalThinkingAgent.think(user_input, scratchpad, user_config)
+                                                    print(f"generalThinkingAgent.think(user_input) {result}")
+                                                    return_string = f"{result}."
+                                                    function_responses.append(
+                                                        {
+                                                            "name": name,
+                                                            "response": {"result": return_string},
+                                                            "id": call_id,
+                                                            "scheduling": "WHEN_IDLE"
+                                                        }
+                                                    )
                                             else:
                                                 print(f"Think_and_repeat_output called but 'user_input' not in args: {args}")
                                         except Exception as e:
