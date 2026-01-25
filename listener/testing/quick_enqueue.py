@@ -31,10 +31,12 @@ def main():
         print("Example: python quick_enqueue.py 5")
         sys.exit(1)
     
+    now_utc = datetime.now(UTC)
     message_contents = {
         "task_id": "a1f7c1c4-2b5c-4a19-9fc3-2d4b1a7c9e01",
-        "title": "Morning workout",
-        "description": "30-minute cardio session at the gym"
+        "title": "Start Websocket",
+        "description": "30-minute cardio session at the gym",
+        "utc_time": now_utc.isoformat().replace("+00:00", "Z"),
     }
     message_content = json.dumps(message_contents)
     
@@ -56,7 +58,7 @@ def main():
         print("Expected format: Endpoint=sb://...")
         sys.exit(1)
     
-    scheduled_time = datetime.now(UTC) + timedelta(minutes=minutes)
+    scheduled_time = now_utc + timedelta(minutes=minutes)
     
     try:
         with ServiceBusClient.from_connection_string(connection_string) as client:
