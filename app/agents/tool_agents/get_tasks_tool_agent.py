@@ -67,14 +67,32 @@ class GetTasksToolAgent:
         # Ensure times have timezone info - if not, use user's timezone from config
         if not start_time.tzinfo:
             if user_config and user_config.get("timezone"):
-                user_tz = ZoneInfo(user_config["timezone"])
+                user_timezone = user_config["timezone"]
+                # Handle UTC specially - ZoneInfo doesn't support "UTC" as a timezone name
+                if user_timezone.upper() == "UTC":
+                    user_tz = timezone.utc
+                else:
+                    try:
+                        user_tz = ZoneInfo(user_timezone)
+                    except Exception:
+                        # Fallback to UTC if timezone is invalid
+                        user_tz = timezone.utc
                 start_time = start_time.replace(tzinfo=user_tz)
             else:
                 start_time = start_time.replace(tzinfo=timezone.utc)
         
         if not end_time.tzinfo:
             if user_config and user_config.get("timezone"):
-                user_tz = ZoneInfo(user_config["timezone"])
+                user_timezone = user_config["timezone"]
+                # Handle UTC specially - ZoneInfo doesn't support "UTC" as a timezone name
+                if user_timezone.upper() == "UTC":
+                    user_tz = timezone.utc
+                else:
+                    try:
+                        user_tz = ZoneInfo(user_timezone)
+                    except Exception:
+                        # Fallback to UTC if timezone is invalid
+                        user_tz = timezone.utc
                 end_time = end_time.replace(tzinfo=user_tz)
             else:
                 end_time = end_time.replace(tzinfo=timezone.utc)
@@ -104,7 +122,11 @@ class GetTasksToolAgent:
             if user_config:
                 user_timezone = user_config.get("timezone", "UTC")
                 try:
-                    user_tz = ZoneInfo(user_timezone)
+                    # Handle UTC specially - ZoneInfo doesn't support "UTC" as a timezone name
+                    if user_timezone.upper() == "UTC":
+                        user_tz = timezone.utc
+                    else:
+                        user_tz = ZoneInfo(user_timezone)
                 except Exception as e:
                     print(f"Warning: Failed to get user timezone {user_timezone}: {e}")
             
