@@ -10,7 +10,10 @@ import pyaudio
 from dotenv import load_dotenv
 
 # Import session management utilities
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+# Add the app directory to the Python path to enable imports like "from database import ..."
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+sys.path.insert(0, os.path.join(project_root, 'app'))
+sys.path.insert(0, project_root)
 from app.session_management_utils import get_session
 
 # ================================
@@ -22,9 +25,10 @@ load_dotenv()
 # Constants (hardcoded user + URL)
 # ================================
 USER_ID = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
+TASK_ID = "253b01f6-67f9-4696-82d3-20581e0926d0"
 WS_URI = (
-    #"ws://localhost:8000/ws/{USER_ID}"
-    f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
+    f"ws://localhost:8000/ws/{USER_ID}"
+    #f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
 )
 
 # ===== Audio Config =====
@@ -181,7 +185,15 @@ async def run_websocket_client():
             print(f"🚀 Connected to WebSocket → {WS_URI}")
 
             init_msg = {
-                "turns": "Tell the user that it is time for them to take their medicine right now",
+                "turns": {
+                    "task": {
+                        "task_id": TASK_ID,
+                        "user_id": USER_ID,
+                        "task_info": {"info": "Take my medicine"},
+                        "time_to_execute": "2026-01-29T10:00:00Z"
+                    },
+                    "message": "Tell the user that it is time for them to complete this task now"
+                },
                 "turn_complete": True
             }
             await ws.send(json.dumps(init_msg))
