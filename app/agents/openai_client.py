@@ -1,5 +1,6 @@
 import os
 from openai import AzureOpenAI
+from openai import APIError
 from dotenv import load_dotenv
 
 # Load environment variables

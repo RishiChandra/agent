@@ -410,8 +410,20 @@ def get_live_config(config_data: UserConfigData) -> LiveConnectConfig:
             "3. **end_conversation**: Use when the user wants to end the call (says goodbye, wants to hang up, etc.).\n"
             "\n\n"
             "## Important Behavior Guidelines\n"
+            "- CRITICAL: If you receive a message that says 'Tell the user that it is time for them to complete this task now' "
+            "followed by task JSON data (with task_id, task_info, etc.), this is a TASK REMINDER. "
+            "Do NOT call think_and_repeat_output for task reminders. Instead, immediately speak the reminder to the user "
+            "in a natural, friendly way (e.g., 'It's time for you to take your medicine' or 'Hey, just a reminder to complete your task: [task description]'). "
+            "The task reminder message is an instruction for you to speak, not user input that needs processing.\n"
             "- When you call the think_and_repeat_output tool, you MUST provide a brief spoken acknowledgment "
             "to the user while waiting, such as 'Let me check that for you', 'One moment', or 'Looking that up now'.\n"
+            "- CRITICAL EXCEPTION: If you just reminded the user about a task and they respond with ONLY 'thanks' or 'okay' "
+            "without clearly indicating they completed the task, do NOT call think_and_repeat_output. "
+            "Instead, directly respond asking for clarification (e.g., 'Did you complete the task?' or 'Have you finished taking your medicine?'). "
+            "This provides faster responses and better user experience. Only call think_and_repeat_output if they clearly indicate completion "
+            "(e.g., 'thanks, just took my medicine', 'done', 'completed', 'I finished it', 'I took my medicine', etc.).\n"
+            "- IMPORTANT: If the user wants to defer the task (e.g., 'I'll do it later', 'not yet', 'I need more time', 'I haven't finished', "
+            "'I'm not done yet', 'remind me later', etc.), you MUST call think_and_repeat_output so the system can defer the task by 5 minutes.\n"
             "- NEVER say you cannot do something before calling the think tool. The tool has access to the user's "
             "personal data and will provide the information you need.\n"
             "- NEVER claim you don't have access to calendars, tasks, or personal information. You DO have access "
@@ -624,11 +636,10 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         async with client.aio.live.connect(model=MODEL, config=config) as gemini_session:
 
             async def send_client_content(content=None, mark_turn_complete=True):
-                """Helper method to send text content to Gemini.
+                """Helper method to send JSON content to Gemini.
                 
                 Args:
-                    content: The message content to send to Gemini. Can be:
-                        - A string (simple text message): "Hello, how are you?"
+                    content: The message content to send to Gemini. Must be JSON format:
                         - A single dict with role and parts: {"role": "user", "parts": [{"text": "Hello"}]}
                         - A list of dicts for multiple turns: [
                             {"role": "user", "parts": [{"text": "What's the weather?"}]},
@@ -636,9 +647,6 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             {"role": "user", "parts": [{"text": "Can you help me find it online?"}]}
                           ]
                         Examples:
-                            # Simple string
-                            await send_client_content("What time is it?")
-                            
                             # Single dict format
                             await send_client_content({"role": "user", "parts": [{"text": "Tell me a joke"}]})
                             
@@ -652,27 +660,17 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                     mark_turn_complete: Boolean indicating whether to mark the turn as complete.
                         When True (default), Gemini will process the message immediately.
                         When False, allows sending partial content that will be completed later.
-                        Example:
-                            # Send partial message
-                            await send_client_content("This is part one...", mark_turn_complete=False)
-                            await send_client_content("...and this is part two.", mark_turn_complete=True)
                 """
                 if content:
                     try:
-                        # Extract text for logging before conversion
-                        if isinstance(content, str):
-                            text_to_log = content
-                        elif isinstance(content, list):
+                        # Extract text for logging
+                        if isinstance(content, list):
                             # For multiple turns, log the last user message
                             text_to_log = content[-1].get('parts', [{}])[0].get('text', '') if content else ''
                         else:
                             text_to_log = content.get('parts', [{}])[0].get('text', '')
                         
-                        # If content is a string, convert it to the proper format
-                        if isinstance(content, str):
-                            content = {"role": "user", "parts": [{"text": content}]}
-                        
-                        # Send text input to Gemini using send_client_content
+                        # Send JSON content to Gemini
                         await gemini_session.send_client_content(
                             turns=content,
                             turn_complete=mark_turn_complete
@@ -695,38 +693,30 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             continue
 
                         # Handle text input (supports multiple formats)
-                        text_content = None
+                        if "audio" not in data:
+                            print(f"🔄 DATA: {data}")
+                        json_content = None
                         turn_complete = True
                         
                         if "turns" in data:
-                            text_content = data["turns"]
-                            turn_complete = data.get("turn_complete", True)
-                        elif "text" in data:
-                            text_content = data["text"]
-                            turn_complete = data.get("turn_complete", True)
-                        elif "input_text" in data:
-                            text_content = data["input_text"]
+                            json_content = data["turns"]
                             turn_complete = data.get("turn_complete", True)
                         
-                        if text_content:
+                        if json_content:
                             # Commit any pending audio buffers before adding text input
                             commit_audio_buffer("user")
                             commit_audio_buffer("agent")
                             
-                            # Extract text for scratchpad
-                            if isinstance(text_content, str):
-                                input_text = text_content
-                            elif isinstance(text_content, list):
-                                # For multiple turns, get the last user message
-                                input_text = text_content[-1].get('parts', [{}])[0].get('text', '') if text_content else ''
-                            else:
-                                input_text = text_content.get('parts', [{}])[0].get('text', '')
-                            
-                            # Add to scratchpad
-                            if input_text:
-                                add_to_scratchpad(source="user", format="text", content=input_text)
-                            
-                            await send_client_content(content=text_content, mark_turn_complete=turn_complete)
+                            message = ""
+                            if "message" in json_content:
+                                message += json_content.get("message", "")
+                            if "task" in json_content:
+                                task = json_content.get("task", {})
+                                message += json.dumps(task)
+                                                            
+                            add_to_scratchpad(source="user", format="text", content=message)
+                            gemini_content = {"role": "user", "parts": [{"text": message}]}
+                            await send_client_content(content=gemini_content, mark_turn_complete=turn_complete)
                             continue
 
                         # Primary path: audio

@@ -8,12 +8,13 @@ import json
 from .openai_client import call_openai
 from .tool_agents.get_tasks_tool_agent import GetTasksToolAgent
 from .tool_agents.create_tasks_tool_agent import CreateTasksToolAgent
+from .tool_agents.edit_tasks_tool_agent import EditTasksToolAgent
 from .tool_agents.generate_response_tool_agent import GenerateResponseToolAgent
 
 class GeneralThinkingAgent:
     tool_agents = {}
     def __init__(self):
-        agents = [GetTasksToolAgent(), CreateTasksToolAgent(), GenerateResponseToolAgent()]
+        agents = [GetTasksToolAgent(), CreateTasksToolAgent(), EditTasksToolAgent(), GenerateResponseToolAgent()]
         for tool_agent in agents:
             self.tool_agents[tool_agent.get_tool_name()] = tool_agent
 
@@ -296,6 +297,20 @@ class GeneralThinkingAgent:
             chat_history.append({"role": "assistant", "name": selected_tool.get_tool_name(), "content": tool_response})
             print(f"Chat history: {chat_history}")
 
+            # Deterministic short-circuit: if we just ran get_tasks_tool, we should NOT call it again.
+            # Empty results are valid - we should generate a response.
+            if selected_tool_name == "get_tasks_tool":
+                try:
+                    parsed = json.loads(tool_response) if isinstance(tool_response, str) else tool_response
+                    # get_tasks_tool always returns a valid response (even if empty)
+                    # If we see a response with "tasks" key, it's valid and we should generate a response
+                    if parsed and ("tasks" in parsed or "total_count" in parsed):
+                        selected_tool_name = "generate_response_tool"
+                        selected_tool = self.tool_agents[selected_tool_name]
+                        break
+                except Exception as e:
+                    print(f"Warning: Failed to parse get_tasks_tool response for short-circuit: {e}")
+            
             # Deterministic short-circuit: if we just ran create_tasks_tool and it either
             # (a) succeeded, or (b) reported that the time is invalid / all tasks are created,
             # then we should NOT call create_tasks_tool again for the same user message.
@@ -372,5 +387,9 @@ class GeneralThinkingAgent:
         # generate_response_tool returns a string directly, other tools return ChatCompletion objects
         if isinstance(response, str):
             return response
-        else:
+        elif response is None:
+            raise ValueError(f"Tool '{selected_tool_name}' returned None - execution may have failed")
+        elif hasattr(response, 'choices') and response.choices:
             return response.choices[0].message.content
+        else:
+            raise ValueError(f"Invalid response from tool '{selected_tool_name}': {response}")

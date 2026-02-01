@@ -23,15 +23,23 @@ class GenerateResponseToolAgent:
         system_content = (
             "Given the chat history, generate the assistant's response to the user. "
             "CRITICAL ANTI-HALLUCINATION RULE: You must base your response EXCLUSIVELY on the information provided in the chat history. "
-            "You are FORBIDDEN from making up, inventing, adding, or mentioning any tasks, events, meetings, deadlines, or information "
+            "You are FORBIDDEN from making up, inventing, adding, or mentioning any tasks, events, meetings, deadlines, or information " 
             "that is NOT explicitly mentioned in the chat history. "
-            "If the chat history contains task data from get_tasks_tool, you MUST use ONLY that exact data - do NOT add, infer, or create "
+            "If the chat history contains task data from get_tasks_tool, you MUST use ONLY that exact data - do NOT add, infer, or create " 
             "additional tasks or details that weren't in the tool response.\n\n"
-            "ZERO TOLERANCE FOR HALLUCINATION: If the tool response lists specific tasks like 'take my medicine' and 'brush my teeth', "
+            "CRITICAL: Empty task results from the get_tasks_tool are VALID and should be reported correctly:\n"
+            "   - If get_tasks_tool returns '{\"tasks\": [], \"total_count\": 0}', this means the user has NO tasks\n"
+            "   - You MUST respond with 'You currently do not have any tasks scheduled' or 'You have no tasks' (or similar)\n"
+            "   - You MUST NOT say 'I'm having trouble accessing your tasks' or 'I cannot retrieve your tasks' - empty results are NOT an error\n"
+            "   - Empty results mean the user genuinely has no tasks, not that there was a problem accessing the database\n\n"
+            "ZERO TOLERANCE FOR HALLUCINATION: If the tool response lists specific tasks like 'take my medicine' and 'brush my teeth', " 
             "you MUST ONLY mention those exact tasks. You MUST NOT mention ANY other tasks that are not in the tool response. This is a critical error.\n\n"
-            "CRITICAL: If multiple tasks were created (you'll see multiple 'create_tasks_tool' responses with 'success': true), "
-            "you MUST mention ALL of them in your response. Do not skip any tasks that were successfully created. "
+            "CRITICAL: If multiple tasks were created (you'll see multiple 'create_tasks_tool' responses with 'success': true), " 
+            "you MUST mention ALL of them in your response. Do not skip any tasks that were successfully created. " 
             "List each task with its description and scheduled time. But do NOT add any tasks that weren't in the tool responses.\n\n"
+            "IMPORTANT: If the user responded to a task reminder but ONLY said 'thanks' or 'okay' without clearly indicating they completed the task, " 
+            "you should ask for clarification (e.g., 'Did you complete the task?' or 'Have you finished taking your medicine?'). " 
+            "Do NOT assume the task is complete unless the user clearly indicated completion.\n\n"
             
         )
         
@@ -60,5 +68,12 @@ class GenerateResponseToolAgent:
         messages.extend(cleaned_chat_history)
 
         response = call_openai(messages)
+        # Check if response is None or invalid
+        if response is None:
+            raise ValueError("call_openai returned None - API call may have failed")
+        if not hasattr(response, 'choices') or not response.choices:
+            raise ValueError(f"Invalid response from call_openai: {response}")
+        if not hasattr(response.choices[0], 'message') or not hasattr(response.choices[0].message, 'content'):
+            raise ValueError(f"Invalid response structure from call_openai: {response}")
         # Return the content string, not the ChatCompletion object
         return response.choices[0].message.content
