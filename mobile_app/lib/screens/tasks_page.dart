@@ -8,6 +8,7 @@ import '../utils/widgets/app_error_message.dart';
 import '../backend/auth_service.dart';
 import 'splash_screen.dart';
 import 'esp_prov_page.dart';
+import 'chat_page.dart';
 
 class TasksPage extends StatefulWidget {
   final String userId;
@@ -113,26 +114,45 @@ class _TasksPageState extends State<TasksPage> {
         ],
       ),
       body: SafeArea(
-        child: Column(
+        child: Stack(
           children: [
-            if (_errorMessage != null) Padding(padding: const EdgeInsets.all(AppSpacing.md), child: AppErrorMessage(message: _errorMessage!)),
-            Expanded(
-              child:
-                  _isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : _tasks.isEmpty
-                      ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.task_alt, size: AppSizes.iconXLarge, color: Colors.grey[400]), const SizedBox(height: AppSpacing.md), Text('No tasks yet', style: AppTextStyles.subheading(context).copyWith(color: Colors.grey[600])), const SizedBox(height: AppSpacing.sm), Text('Tap the + button to create your first task', style: AppTextStyles.bodySmall(context))]))
-                      : RefreshIndicator(
-                        onRefresh: _loadTasks,
-                        child: ListView.builder(
-                          padding: const EdgeInsets.all(AppSpacing.md),
-                          itemCount: _tasks.length,
-                          itemBuilder: (context, index) {
-                            final task = _tasks[index];
-                            return _TaskCard(task: task, onEdit: () => _showTaskDialog(task: task), onDelete: () => _handleDeleteTask(task.taskId));
-                          },
-                        ),
-                      ),
+            Column(
+              children: [
+                if (_errorMessage != null) Padding(padding: const EdgeInsets.all(AppSpacing.md), child: AppErrorMessage(message: _errorMessage!)),
+                Expanded(
+                  child:
+                      _isLoading
+                          ? const Center(child: CircularProgressIndicator())
+                          : _tasks.isEmpty
+                          ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.task_alt, size: AppSizes.iconXLarge, color: Colors.grey[400]), const SizedBox(height: AppSpacing.md), Text('No tasks yet', style: AppTextStyles.subheading(context).copyWith(color: Colors.grey[600])), const SizedBox(height: AppSpacing.sm), Text('Tap the + button to create your first task', style: AppTextStyles.bodySmall(context))]))
+                          : RefreshIndicator(
+                            onRefresh: _loadTasks,
+                            child: ListView.builder(
+                              padding: const EdgeInsets.all(AppSpacing.md),
+                              itemCount: _tasks.length,
+                              itemBuilder: (context, index) {
+                                final task = _tasks[index];
+                                return _TaskCard(task: task, onEdit: () => _showTaskDialog(task: task), onDelete: () => _handleDeleteTask(task.taskId));
+                              },
+                            ),
+                          ),
+                ),
+              ],
+            ),
+            Positioned(
+              left: AppSpacing.md,
+              bottom: AppSpacing.md,
+              child: Material(
+                elevation: 2,
+                borderRadius: BorderRadius.circular(AppSizes.radiusMedium),
+                child: InkWell(
+                  onTap: () {
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => ChatPage(userId: widget.userId)));
+                  },
+                  borderRadius: BorderRadius.circular(AppSizes.radiusMedium),
+                  child: Padding(padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm), child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.chat_bubble_outline, size: AppSizes.iconMedium), const SizedBox(width: AppSpacing.xs), Text('Chat', style: AppTextStyles.body(context).copyWith(fontWeight: FontWeight.w500))])),
+                ),
+              ),
             ),
           ],
         ),
