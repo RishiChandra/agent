@@ -44,7 +44,10 @@ Get approved, merge + delete branch.
 Local Cleanup:
 Go to main branch
 Delete remote branches: ```git fetch --prune```
-Delete local branches: ```git branch -D branch-name```
+Delete all local branches (except main/master and current):
+- **Git Bash**: ```git branch | grep -v "^\*\|main\|master" | xargs git branch -D```
+- **PowerShell**: ```git branch | Where-Object { $_ -notmatch '^\*|main|master' } | ForEach-Object { git branch -D $_.Trim() }```
+Or delete a specific branch: ```git branch -D branch-name```
 
 In general keep PRs as small as feasible. Minimize commit and branch complexity for everyone's sake.
 
