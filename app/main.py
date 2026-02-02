@@ -7,12 +7,14 @@ from fastapi import FastAPI
 load_dotenv()
 
 from task_routes import router
+from routes.messaging_routes import router as messaging_router
 from websocket_handler import websocket_endpoint
 
 app = FastAPI()
 
 # Include all HTTP endpoints from routes
 app.include_router(router)
+app.include_router(messaging_router)
 
 # Register WebSocket endpoint
 app.websocket("/ws/{user_id}")(websocket_endpoint)
