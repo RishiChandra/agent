@@ -32,12 +32,21 @@ def main():
         sys.exit(1)
     
     now_utc = datetime.now(UTC)
+    USER_ID = "4dd16650-c57a-44c4-b530-fc1c15d50e45"
+    TASK_ID = "253b01f6-67f9-4696-82d3-20581e0926d0"
     message_contents = {
-        "task_id": "a1f7c1c4-2b5c-4a19-9fc3-2d4b1a7c9e01",
-        "title": "Start Websocket",
-        "description": "30-minute cardio session at the gym",
-        "utc_time": now_utc.isoformat().replace("+00:00", "Z"),
+        "turns": {
+            "task": {
+                "task_id": TASK_ID,
+                "user_id": USER_ID,
+                "task_info": {"info": "Take my medicine"},
+                "time_to_execute": "2026-01-29T10:00:00Z"
+            },
+            "message": "Tell the user that it is time for them to complete this task now"
+        },
+        "turn_complete": True
     }
+
     message_content = json.dumps(message_contents)
     
     try:
