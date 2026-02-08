@@ -187,16 +187,35 @@ class GeneralThinkingAgent:
                     if entry.get("response") and entry.get("response").get("result"):
                         # The result contains information about what was done (e.g., "Task created successfully")
                         result_content = entry["response"]["result"]
-                        # Make it clear this is a completed action from a previous interaction
-                        # Note: This is the final response message, not the tool execution result
-                        # But it indicates what action was taken in response to a previous user request
                         tool_name = entry.get("name", "tool")
-                        # Format to make it clear this represents a completed action from a previous turn
-                        tool_context = f"[Completed in previous interaction via {tool_name}]: {result_content}"
-                        chat_history.append({
-                            "role": "assistant",
-                            "content": tool_context
-                        })
+                        
+                        # For think_and_repeat_output, include the actual tool responses if available
+                        # This allows tools like edit_tasks_tool to find task_ids from previous tool calls
+                        if tool_name == "think_and_repeat_output":
+                            # First, include the actual tool responses (create_tasks_tool, get_tasks_tool, etc.)
+                            # These are stored in the response's tool_responses field
+                            if entry.get("response").get("tool_responses"):
+                                for tool_response in entry["response"]["tool_responses"]:
+                                    if isinstance(tool_response, dict) and tool_response.get("name") and tool_response.get("content"):
+                                        chat_history.append({
+                                            "role": "assistant",
+                                            "name": tool_response["name"],
+                                            "content": tool_response["content"]
+                                        })
+                            
+                            # Then include the formatted result message
+                            tool_context = f"[Completed in previous interaction via {tool_name}]: {result_content}"
+                            chat_history.append({
+                                "role": "assistant",
+                                "content": tool_context
+                            })
+                        else:
+                            # For other function calls, just include the result
+                            tool_context = f"[Completed in previous interaction via {tool_name}]: {result_content}"
+                            chat_history.append({
+                                "role": "assistant",
+                                "content": tool_context
+                            })
         
         # Add the current user input
         chat_history.append({"role": "user", "content": user_input})
@@ -311,6 +330,19 @@ class GeneralThinkingAgent:
                 except Exception as e:
                     print(f"Warning: Failed to parse get_tasks_tool response for short-circuit: {e}")
             
+            # Deterministic short-circuit: if we just ran edit_tasks_tool and it succeeded,
+            # then we should NOT call edit_tasks_tool again for the same user message.
+            if selected_tool_name == "edit_tasks_tool":
+                try:
+                    parsed = json.loads(tool_response) if isinstance(tool_response, str) else tool_response
+                    success = (parsed or {}).get("success")
+                    if success is True:
+                        selected_tool_name = "generate_response_tool"
+                        selected_tool = self.tool_agents[selected_tool_name]
+                        break
+                except Exception as e:
+                    print(f"Warning: Failed to parse edit_tasks_tool response for short-circuit: {e}")
+            
             # Deterministic short-circuit: if we just ran create_tasks_tool and it either
             # (a) succeeded, or (b) reported that the time is invalid / all tasks are created,
             # then we should NOT call create_tasks_tool again for the same user message.
@@ -386,10 +418,17 @@ class GeneralThinkingAgent:
         response = selected_tool.execute_tool(chat_history, user_config)
         # generate_response_tool returns a string directly, other tools return ChatCompletion objects
         if isinstance(response, str):
-            return response
+            result = response
         elif response is None:
             raise ValueError(f"Tool '{selected_tool_name}' returned None - execution may have failed")
         elif hasattr(response, 'choices') and response.choices:
-            return response.choices[0].message.content
+            result = response.choices[0].message.content
         else:
             raise ValueError(f"Invalid response from tool '{selected_tool_name}': {response}")
+        
+        # Return both the result and the chat_history (which contains tool responses)
+        # This allows tools like edit_tasks_tool to find task_ids from previous tool calls
+        return {
+            "result": result,
+            "chat_history": chat_history
+        }
