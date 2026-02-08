@@ -51,6 +51,10 @@ Or delete a specific branch: ```git branch -D branch-name```
 
 In general keep PRs as small as feasible. Minimize commit and branch complexity for everyone's sake.
 
+## Server Logs
+View here
+<img width="1715" height="855" alt="Screenshot 2026-02-07 at 14 32 28" src="https://github.com/user-attachments/assets/d03fd709-93c7-4aae-9b97-8adeb63688e1" />
+
 ## Mobile App (Flutter)
 Prereqs: Flutter SDK installed and a device/simulator available.
 From ```mobile_app```: run ```flutter pub get``` then ```flutter run```.
