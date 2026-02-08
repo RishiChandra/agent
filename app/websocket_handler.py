@@ -3,6 +3,8 @@ import base64
 import asyncio
 import traceback
 import time
+from typing import List, Dict, Any, Optional
+
 from fastapi import WebSocket, WebSocketDisconnect
 from google.genai import types
 from agents import general_thinking_agent
@@ -13,6 +15,12 @@ from gemini_config import (
     UserConfigData,
 )
 from user_session_manager import UserSessionManager, update_user_session_status
+from routes.message_crud import (
+    get_pending_messages_for_user,
+    mark_messages_as_read,
+    clear_pending_text_message_job_for_user,
+)
+from routes.task_crud import get_task_by_id
 
 # Instantiate the general thinking agent
 generalThinkingAgent = general_thinking_agent.GeneralThinkingAgent()
@@ -207,7 +215,12 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 while True:
                     try:
                         msg = await websocket.receive_text()
+                        print(f"[DEBUG] WebSocket received raw message (length={len(msg)})")
                         data = json.loads(msg)
+                        print(f"[DEBUG] WebSocket message parsed keys={list(data.keys())}")
+
+                        if data.get("text") is not None:
+                            print(f"[DEBUG] Received text (top-level) user_id={user_id} text={data.get('text')!r}")
 
                         # Handle interrupt requests
                         if data.get("interrupt") or (data.get("text") and "stop" in data.get("text", "").lower()):
@@ -215,28 +228,119 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             await interrupt()  # Call the interrupt function
                             continue
 
+                        # --- pending_message true: get messages from DB and ask AI to tell the user about incoming messages ---
+                        # ESP32 may send this inside turns as a JSON string: {"command":"start_websocket","reason":"text_message","pending_messages":true,...}
+                        parsed_turns = None
+                        if "turns" in data:
+                            raw_turns = data["turns"]
+                            if isinstance(raw_turns, str):
+                                try:
+                                    parsed_turns = json.loads(raw_turns)
+                                except (json.JSONDecodeError, TypeError):
+                                    parsed_turns = None
+                            else:
+                                parsed_turns = raw_turns
+                        pending_from_turns = (
+                            isinstance(parsed_turns, dict)
+                            and (
+                                parsed_turns.get("pending_messages") is True
+                                or parsed_turns.get("reason") == "text_message"
+                            )
+                        )
+                        pending_task_from_turns = (
+                            isinstance(parsed_turns, dict)
+                            and (
+                                parsed_turns.get("pending_task") is True
+                                or parsed_turns.get("reason") == "task"
+                            )
+                        )
+                        if pending_from_turns:
+                            print(f"[DEBUG] ESP32 text_message/pending_messages in turns user_id={user_id}")
+                        if pending_task_from_turns:
+                            print(f"[DEBUG] ESP32 pending_task/task in turns user_id={user_id}")
+                        if data.get("pending_message") is True or data.get("pending_messages") is True or pending_from_turns:
+                            commit_audio_buffer("user")
+                            commit_audio_buffer("agent")
+                            pending_list = await asyncio.to_thread(get_pending_messages_for_user, user_id)
+                            if pending_list:
+                                lines = [
+                                    f"From {m['sender_name']}: {m['content']}"
+                                    for m in pending_list
+                                ]
+                                raw_messages = "\n".join(lines)
+                                instruction = (
+                                    "The user has new incoming messages. Tell them about these messages in a natural, "
+                                    "helpful way. Do not invent or add any messages; only report what is below.\n\n"
+                                    "Incoming messages:\n"
+                                )
+                                message = instruction + raw_messages
+                                add_to_scratchpad(source="user", format="text", content=message)
+                                gemini_content = {"role": "user", "parts": [{"text": message}]}
+                                await send_client_content(content=gemini_content, mark_turn_complete=True)
+                                print(f"📤 Sent {len(pending_list)} pending message(s) to Gemini (instructed to tell user)")
+                                await asyncio.to_thread(mark_messages_as_read, pending_list)
+                                await asyncio.to_thread(clear_pending_text_message_job_for_user, user_id)
+                            continue
+
+                        # --- pending_task true: get task (from payload or DB) and ask AI to tell the user about the task ---
+                        # ESP32 may send this inside turns as a JSON string: {"command":"...","reason":"task","pending_task":true,"task_id":"...",...}
+                        if data.get("pending_task") is True or pending_task_from_turns:
+                            commit_audio_buffer("user")
+                            commit_audio_buffer("agent")
+                            task_source = parsed_turns if (pending_task_from_turns and isinstance(parsed_turns, dict)) else data
+                            task_id = task_source.get("task_id")
+                            task = None
+                            if task_id:
+                                try:
+                                    task = await asyncio.to_thread(get_task_by_id, task_id)
+                                except Exception:
+                                    task = None
+                            if task is None and (task_source.get("task_id") or task_source.get("title") or task_source.get("description")):
+                                task = {
+                                    "task_id": task_source.get("task_id"),
+                                    "task_info": task_source.get("task_info") or {"title": task_source.get("title"), "description": task_source.get("description") or task_source.get("info", "")},
+                                    "time_to_execute": task_source.get("time_to_execute"),
+                                }
+                            if task:
+                                info = task.get("task_info") or {}
+                                if isinstance(info, dict):
+                                    title = info.get("title") or info.get("info", "Task")
+                                    desc = info.get("description") or info.get("info", "")
+                                else:
+                                    title, desc = "Task", str(info)
+                                when = task.get("time_to_execute") or "now"
+                                instruction = (
+                                    "It is time for the user to do this task. Tell them about it in a natural, helpful way. "
+                                    "Do not invent any other tasks.\n\n"
+                                    f"Task: {title}\nDescription: {desc}\nWhen: {when}"
+                                )
+                                add_to_scratchpad(source="user", format="text", content=instruction)
+                                gemini_content = {"role": "user", "parts": [{"text": instruction}]}
+                                await send_client_content(content=gemini_content, mark_turn_complete=True)
+                                print("📤 Sent pending task to Gemini (instructed to tell user)")
+                            continue
+
                         # Handle text input (supports multiple formats)
                         if "audio" not in data:
                             print(f"🔄 DATA: {data}")
                         json_content = None
                         turn_complete = True
-                        
                         if "turns" in data:
-                            json_content = data["turns"]
+                            # Use parsed_turns if we already parsed (e.g. ESP32 sends turns as JSON string)
+                            json_content = parsed_turns if parsed_turns is not None else data["turns"]
                             turn_complete = data.get("turn_complete", True)
-                        
-                        if json_content:
+                        # Only send to Gemini when we have a dict with actual chat content (message/task), not command payloads
+                        if isinstance(json_content, dict) and ("message" in json_content or "task" in json_content):
                             # Commit any pending audio buffers before adding text input
                             commit_audio_buffer("user")
                             commit_audio_buffer("agent")
-                            
                             message = ""
                             if "message" in json_content:
                                 message += json_content.get("message", "")
                             if "task" in json_content:
                                 task = json_content.get("task", {})
                                 message += json.dumps(task)
-                                                            
+                            print(f"[DEBUG] Received text message user_id={user_id} content={message!r}")
                             add_to_scratchpad(source="user", format="text", content=message)
                             gemini_content = {"role": "user", "parts": [{"text": message}]}
                             await send_client_content(content=gemini_content, mark_turn_complete=turn_complete)

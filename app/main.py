@@ -6,7 +6,7 @@ from fastapi import FastAPI
 # https://ai.google.dev/gemini-api/docs/live-guide
 load_dotenv()
 
-from task_routes import router
+from routes.task_routes import router
 from routes.messaging_routes import router as messaging_router
 from websocket_handler import websocket_endpoint
 

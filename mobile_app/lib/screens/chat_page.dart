@@ -87,6 +87,7 @@ class _ChatPageState extends State<ChatPage> {
     _messageController.clear();
 
     try {
+      // POST /messages saves the message and enqueues for the AI; no need to call /messages/enqueue separately
       await _messagingService.sendMessage(userId: widget.userId, chatId: _effectiveChatId, content: text, timestamp: DateTime.now());
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Message sent')));

@@ -4,14 +4,14 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from task_crud import (
+from .task_crud import (
     get_tasks_by_user_id,
     get_task_by_id,
     create_task,
     update_task,
     delete_task
 )
-from task_enqueue import enqueue_task as enqueue_task_to_service_bus
+from enqueue.task_enqueue import enqueue_task as enqueue_task_to_service_bus
 
 # Create router for all endpoints
 router = APIRouter()

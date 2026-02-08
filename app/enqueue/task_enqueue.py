@@ -67,6 +67,8 @@ def prepare_message_contents(
     message_contents = {
         "task_id": task_id,
         "user_id": user_id,
+        "pending_task": True,
+        "pending_message": False,
     }
     
     # Add task_info fields if available
