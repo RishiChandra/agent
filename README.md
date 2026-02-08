@@ -64,6 +64,9 @@ Credentials can be found in internal docs (ask Rishi) or in the env vars of the 
 ## Listener Function app
 Deploy with ```func azure functionapp publish listener --python``` in listener dir
 
+View Listener Logs Here:
+<img width="1672" height="879" alt="Screenshot 2026-02-07 at 15 19 02" src="https://github.com/user-attachments/assets/b93e9b30-8652-46f1-b970-29a239fd7f46" />
+
 Note when publishing:
 - Make sure your func is up to date, and azure core tools
 - Ask cursor to view the deployment logs via Azure CLI 
