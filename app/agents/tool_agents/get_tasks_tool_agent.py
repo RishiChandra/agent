@@ -18,8 +18,28 @@ class GetTasksToolAgent:
         return self.name
 
     def execute_tool(self, chat_history, user_config=None):
+        # Build system message with explicit date interpretation rules
+        system_content = (
+            f"Given the chat history {chat_history}, and the user config {user_config}, the assistant has decided to use the {self.name}. "
+            "CRITICAL DATE INTERPRETATION RULES:\n"
+            "- If the user asks for tasks 'today', use the CURRENT CALENDAR DATE from 00:00:00 to 23:59:59 in the user's timezone, NOT a 24-hour window from now.\n"
+            "- If the user asks for tasks 'tomorrow', use the NEXT CALENDAR DATE from 00:00:00 to 23:59:59 in the user's timezone.\n"
+            "- If the user asks for tasks 'this week', use the current week (Monday to Sunday) in the user's timezone.\n"
+            "- If no specific date is mentioned, default to 'today' (current calendar date).\n"
+            "- ALWAYS use calendar dates, not 24-hour windows from the current time.\n"
+        )
+        
+        if user_config:
+            current_date_str = user_config.get("current_date_str", "")
+            current_time_str = user_config.get("current_time_str", "")
+            user_timezone_str = user_config.get("timezone", "UTC")
+            system_content += (
+                f"\nCurrent context: Today is {current_date_str}, current time is {current_time_str} in timezone {user_timezone_str}. "
+                f"When the user asks for 'today', use {current_date_str} from 00:00:00 to 23:59:59 in {user_timezone_str}."
+            )
+        
         messages = [
-            {"role": "system", "content": f"Given the chat history {chat_history}, and the user config {user_config}, the assistant has decided to use the {self.name}"},
+            {"role": "system", "content": system_content},
         ]
 
         selecting_tool = {
@@ -32,11 +52,11 @@ class GetTasksToolAgent:
                     "properties": {
                         "start_time": {
                             "type": "string",
-                            "description": "The start time of the time range to get tasks for. This should be in the format of a python datetime with timezone.",
+                            "description": "The start time of the time range to get tasks for. This should be in the format of a python datetime with timezone. For 'today', use 00:00:00 of the current calendar date. For 'tomorrow', use 00:00:00 of the next calendar date.",
                         },
                         "end_time": {
                             "type": "string",
-                            "description": "The start time of the time range to get tasks for. This should be in the format of a python datetime with timezone.",
+                            "description": "The end time of the time range to get tasks for. This should be in the format of a python datetime with timezone. For 'today', use 23:59:59 of the current calendar date. For 'tomorrow', use 23:59:59 of the next calendar date.",
                         },
                     },
                     "required": ["start_time", "end_time"],

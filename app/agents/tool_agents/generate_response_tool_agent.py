@@ -37,16 +37,28 @@ class GenerateResponseToolAgent:
             "CRITICAL: If multiple tasks were created (you'll see multiple 'create_tasks_tool' responses with 'success': true), " 
             "you MUST mention ALL of them in your response. Do not skip any tasks that were successfully created. " 
             "List each task with its description and scheduled time. But do NOT add any tasks that weren't in the tool responses.\n\n"
+            "CRITICAL DATE/TIME FORMATTING: When listing tasks, you MUST check the date of each task relative to the current date:\n"
+            "   - If a task's date matches the current date, say 'today' (e.g., 'Take my medicine at 10:00 PM today')\n"
+            "   - If a task's date is the next calendar day, say 'tomorrow' (e.g., 'Brush my teeth at 6:00 AM tomorrow')\n"
+            "   - If a task's date is further out, include the actual date (e.g., 'Meeting on February 10 at 2:00 PM')\n"
+            "   - Do NOT say 'today' for tasks that are tomorrow or later. Check the actual date in the time_to_execute field.\n"
+            "   - Group tasks by date: list all 'today' tasks together, then 'tomorrow' tasks, then future tasks.\n\n"
             "IMPORTANT: If the user responded to a task reminder but ONLY said 'thanks' or 'okay' without clearly indicating they completed the task, " 
             "you should ask for clarification (e.g., 'Did you complete the task?' or 'Have you finished taking your medicine?'). " 
             "Do NOT assume the task is complete unless the user clearly indicated completion.\n\n"
             
         )
         
-        # Add timezone context if available
+        # Add timezone and date context if available
         if user_config:
             timezone = user_config.get("timezone", "UTC")
-            system_content += f" When mentioning times, use the user's timezone ({timezone}). Times in the chat history are already in the user's timezone."
+            current_date_str = user_config.get("current_date_str", "")
+            current_time_str = user_config.get("current_time_str", "")
+            system_content += (
+                f" When mentioning times, use the user's timezone ({timezone}). Times in the chat history are already in the user's timezone. "
+                f"The current date is {current_date_str} and current time is {current_time_str}. "
+                f"Use this to determine if tasks are 'today', 'tomorrow', or on a specific future date."
+            )
         
         # Build messages with system prompt and chat history
         messages = [

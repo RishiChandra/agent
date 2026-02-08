@@ -51,6 +51,10 @@ Or delete a specific branch: ```git branch -D branch-name```
 
 In general keep PRs as small as feasible. Minimize commit and branch complexity for everyone's sake.
 
+## Server Logs
+View here
+<img width="1715" height="855" alt="Screenshot 2026-02-07 at 14 32 28" src="https://github.com/user-attachments/assets/d03fd709-93c7-4aae-9b97-8adeb63688e1" />
+
 ## Mobile App (Flutter)
 Prereqs: Flutter SDK installed and a device/simulator available.
 From ```mobile_app```: run ```flutter pub get``` then ```flutter run```.
@@ -63,6 +67,9 @@ Credentials can be found in internal docs (ask Rishi) or in the env vars of the 
 
 ## Listener Function app
 Deploy with ```func azure functionapp publish listener --python``` in listener dir
+
+View Listener Logs Here:
+<img width="1672" height="879" alt="Screenshot 2026-02-07 at 15 19 02" src="https://github.com/user-attachments/assets/b93e9b30-8652-46f1-b970-29a239fd7f46" />
 
 Note when publishing:
 - Make sure your func is up to date, and azure core tools

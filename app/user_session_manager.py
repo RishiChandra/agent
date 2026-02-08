@@ -3,13 +3,10 @@ from typing import Tuple
 from zoneinfo import ZoneInfo
 from session_management_utils import get_session, create_session, update_session_status
 from database import get_user_by_id
-from gemini_config import get_live_config, UserConfigData
+from gemini_config import get_live_config
 from google.genai.types import LiveConnectConfig
-
-
-def update_user_session_status(user_id: str, is_active: bool) -> None:
-    """Helper function to update session status (for use in exception handlers)."""
-    update_session_status(user_id, is_active)
+from scratchpad import Scratchpad
+from user_config import UserConfigData
 
 
 class UserSessionManager:
@@ -19,8 +16,15 @@ class UserSessionManager:
         self.user_id = user_id
         self.db_session = None
         self.user_info = None
-        self.user_config = None
-        self.live_config = None
+        self.user_config: UserConfigData = None
+        self.config: LiveConnectConfig = None
+        self.scratchpad = Scratchpad()
+        
+        # Initialize everything in the constructor
+        self.initialize_session()
+        self.load_user_info()
+        self.build_user_config()
+        self.get_live_config()
     
     def initialize_session(self) -> None:
         """Initialize or retrieve the database session for the user."""
@@ -107,20 +111,16 @@ class UserSessionManager:
         if not self.user_config:
             self.build_user_config()
         
-        self.live_config = get_live_config(self.user_config)
+        self.config = get_live_config(self.user_config)
         print(f"🔄 User config: {self.user_config}")
         
-        return self.live_config
+        return self.config
     
-    def setup(self) -> Tuple[dict, LiveConnectConfig]:
-        """Complete setup: initialize session, load user info, and get live config.
+    def update_user_session_status(self, is_active: bool) -> None:
+        """Update session status (for use in exception handlers).
         
-        Returns:
-            Tuple of (user_config dict, live_config LiveConnectConfig)
+        Args:
+            user_id: The user ID to update the session status for
+            is_active: Whether the session is active or not
         """
-        self.initialize_session()
-        self.load_user_info()
-        user_config = self.build_user_config()
-        live_config = self.get_live_config()
-        
-        return user_config, live_config
+        update_session_status(self.user_id, is_active)
