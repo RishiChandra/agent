@@ -11,7 +11,7 @@ import psycopg2
 
 # Import enqueue function (with safe import to avoid circular dependencies)
 try:
-    from task_enqueue import enqueue_task_safe
+    from enqueue.task_enqueue import enqueue_task_safe
 except ImportError:
     enqueue_task_safe = None
 

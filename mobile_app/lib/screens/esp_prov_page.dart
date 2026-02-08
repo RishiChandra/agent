@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_esp_ble_prov/flutter_esp_ble_prov.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../backend/auth_service.dart';
+import '../backend/database_service.dart';
 import 'home_page.dart';
+import 'tasks_page.dart';
 
 class EspProvPage extends StatefulWidget {
   const EspProvPage({super.key});
@@ -14,6 +16,7 @@ class _EspProvPageState extends State<EspProvPage> {
   final prov = FlutterEspBleProv();
   final PageController _pageController = PageController();
   final AuthService _authService = AuthService();
+  final DatabaseService _dbService = DatabaseService();
 
   final prefixCtrl = TextEditingController(text: 'PROV_');
   final passCtrl = TextEditingController();
@@ -39,6 +42,31 @@ class _EspProvPageState extends State<EspProvPage> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error signing out: $e')));
+      }
+    }
+  }
+
+  Future<void> _skipProvisioning() async {
+    final currentUser = _authService.currentUser;
+    if (currentUser == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Not signed in')));
+      }
+      return;
+    }
+    try {
+      final profile = await _dbService.getUserByFirebaseUid(currentUser.uid);
+      if (profile != null && mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => TasksPage(userId: profile.userId)),
+          (route) => false,
+        );
+      } else if (mounted) {
+        Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const HomePage()), (route) => false);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
   }
@@ -98,7 +126,18 @@ class _EspProvPageState extends State<EspProvPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      appBar: AppBar(title: const Text('ESP BLE Provision'), scrolledUnderElevation: 0, surfaceTintColor: Colors.transparent, actions: [IconButton(icon: const Icon(Icons.logout), onPressed: _signOut, tooltip: 'Sign Out')]),
+      appBar: AppBar(
+        title: const Text('ESP BLE Provision'),
+        scrolledUnderElevation: 0,
+        surfaceTintColor: Colors.transparent,
+        actions: [
+          TextButton(
+            onPressed: _skipProvisioning,
+            child: const Text('Skip'),
+          ),
+          IconButton(icon: const Icon(Icons.logout), onPressed: _signOut, tooltip: 'Sign Out'),
+        ],
+      ),
       body: Column(
         children: [
           Expanded(

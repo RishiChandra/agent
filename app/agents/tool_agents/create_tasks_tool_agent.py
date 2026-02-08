@@ -6,7 +6,7 @@ from database import execute_update
 from psycopg2.extras import Json
 
 from ..openai_client import call_openai
-from task_enqueue import enqueue_task
+from enqueue.task_enqueue import enqueue_task
 
 class CreateTasksToolAgent:
     name = "create_tasks_tool"

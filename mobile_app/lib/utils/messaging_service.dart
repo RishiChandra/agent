@@ -16,6 +16,16 @@ class MessagingService {
     }
   }
 
+  /// Triggers the message enqueue endpoint so the AI will respond in the chip (one pending per user).
+  Future<void> enqueueMessage({required String userId, required String chatId}) async {
+    final url = Uri.parse('$_backendBaseUrl/messages/enqueue');
+    final requestBody = <String, dynamic>{'user_id': userId, 'chat_id': chatId};
+    final response = await http.post(url, headers: {'Content-Type': 'application/json'}, body: jsonEncode(requestBody));
+    if (response.statusCode >= 400) {
+      _handleHttpError(response, 'Enqueue message');
+    }
+  }
+
   /// Sends a message to the backend. Returns the created message (including message_id).
   Future<Map<String, dynamic>> sendMessage({required String userId, required String chatId, required String content, required DateTime timestamp}) async {
     final url = Uri.parse('$_backendBaseUrl/messages');
