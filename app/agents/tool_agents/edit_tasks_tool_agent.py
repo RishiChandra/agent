@@ -5,6 +5,7 @@ from database import execute_query, execute_update
 from psycopg2.extras import Json
 
 from ..openai_client import call_openai
+from ..utils.task_extraction_utils import extract_tasks_from_chat_history
 
 class EditTasksToolAgent:
     name = "edit_tasks_tool"
@@ -33,124 +34,10 @@ class EditTasksToolAgent:
         # Extract task information from chat history
         # Look for task_id from previous get_tasks_tool or create_tasks_tool results
         # Also check all messages (including user messages) for embedded JSON task data (e.g., from task reminders)
-        available_tasks = []
-        for msg in chat_history:
-            # Check for get_tasks_tool results
-            if msg.get("name") == "get_tasks_tool" and msg.get("content"):
-                try:
-                    content = json.loads(msg["content"]) if isinstance(msg["content"], str) else msg["content"]
-                    if content.get("tasks"):
-                        for task in content.get("tasks", []):
-                            if task.get("task_id"):
-                                available_tasks.append({
-                                    "task_id": task.get("task_id"),
-                                    "task_info": task.get("task_info", {}),
-                                    "status": task.get("status", "pending"),
-                                    "time_to_execute": task.get("time_to_execute")
-                                })
-                except:
-                    pass
-            # Check for create_tasks_tool results
-            elif msg.get("name") == "create_tasks_tool" and msg.get("content"):
-                try:
-                    content = json.loads(msg["content"]) if isinstance(msg["content"], str) else msg["content"]
-                    if content.get("success") and content.get("task_id"):
-                        available_tasks.append({
-                            "task_id": content.get("task_id"),
-                            "task_info": content.get("task_info", {}),
-                            "status": content.get("status", "pending"),
-                            "time_to_execute": content.get("time_to_execute")
-                        })
-                except:
-                    pass
-            # Check for edit_tasks_tool results (these contain the most up-to-date task state)
-            elif msg.get("name") == "edit_tasks_tool" and msg.get("content"):
-                try:
-                    content = json.loads(msg["content"]) if isinstance(msg["content"], str) else msg["content"]
-                    if content.get("success") and content.get("task_id"):
-                        available_tasks.append({
-                            "task_id": content.get("task_id"),
-                            "task_info": content.get("task_info", {}),
-                            "status": content.get("status", "pending"),
-                            "time_to_execute": content.get("time_to_execute")
-                        })
-                except:
-                    pass
-            # Check any message (user or assistant) for embedded JSON task data (e.g., from task reminders)
-            # The chat history from general_thinking_agent includes all user input, so we can extract task info from any message
-            elif msg.get("content"):
-                try:
-                    content = msg["content"]
-                    # Try to find JSON task data in the message content
-                    # The JSON may be appended to text, so try to find it at the end
-                    import re
-                    
-                    # Strategy 1: Find the last occurrence of { that might contain task_id
-                    brace_start = content.rfind('{')
-                    if brace_start != -1:
-                        # Try to extract JSON from this position to the end
-                        remaining = content[brace_start:]
-                        # Try to parse as JSON
-                        try:
-                            task_data = json.loads(remaining)
-                            if task_data.get("task_id"):
-                                available_tasks.append({
-                                    "task_id": task_data.get("task_id"),
-                                    "task_info": task_data.get("task_info", {}),
-                                    "status": task_data.get("status", "pending"),
-                                    "time_to_execute": task_data.get("time_to_execute")
-                                })
-                                continue  # Successfully extracted, move to next message
-                        except json.JSONDecodeError:
-                            pass
-                    
-                    # Strategy 2: If parsing from last { failed, try to find JSON object with proper brace matching
-                    # Look for "task_id" and then find the enclosing JSON object
-                    task_id_pos = content.find('"task_id"')
-                    if task_id_pos != -1:
-                        # Find the opening brace before "task_id"
-                        brace_start = content.rfind('{', 0, task_id_pos)
-                        if brace_start != -1:
-                            # Find the matching closing brace by counting braces
-                            brace_count = 0
-                            brace_end = -1
-                            for i in range(brace_start, len(content)):
-                                if content[i] == '{':
-                                    brace_count += 1
-                                elif content[i] == '}':
-                                    brace_count -= 1
-                                    if brace_count == 0:
-                                        brace_end = i + 1
-                                        break
-                            
-                            if brace_end > brace_start:
-                                try:
-                                    json_str = content[brace_start:brace_end]
-                                    task_data = json.loads(json_str)
-                                    if task_data.get("task_id"):
-                                        available_tasks.append({
-                                            "task_id": task_data.get("task_id"),
-                                            "task_info": task_data.get("task_info", {}),
-                                            "status": task_data.get("status", "pending"),
-                                            "time_to_execute": task_data.get("time_to_execute")
-                                        })
-                                except (json.JSONDecodeError, ValueError):
-                                    pass
-                except Exception as e:
-                    # Silently continue if extraction fails
-                    pass
-
-        # Deduplicate available_tasks by task_id, keeping only the most recent entry
-        # (later entries in chat_history are more recent)
-        task_id_to_task = {}
+        available_tasks = extract_tasks_from_chat_history(chat_history)
+        print(f"DEBUG: Extracted {len(available_tasks)} tasks from chat history")
         for task in available_tasks:
-            task_id = task.get("task_id")
-            if task_id:
-                # If we've seen this task_id before, replace it (keep the most recent)
-                task_id_to_task[task_id] = task
-        
-        # Convert back to list
-        available_tasks = list(task_id_to_task.values())
+            print(f"DEBUG: Found task_id: {task.get('task_id')}, description: {task.get('task_info', {}).get('info', 'N/A')}")
         
         # If we have task_ids, fetch current state from database to ensure accuracy
         if available_tasks and user_config and user_config.get("user_info"):

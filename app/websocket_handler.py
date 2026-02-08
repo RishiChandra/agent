@@ -13,7 +13,7 @@ from gemini_config import (
     MODEL,
     SEND_SAMPLE_RATE,
 )
-from user_session_manager import UserSessionManager, update_user_session_status
+from user_session_manager import UserSessionManager
 from routes.message_crud import (
     get_pending_messages_for_user,
     mark_messages_as_read,
@@ -102,9 +102,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 while True:
                     try:
                         msg = await websocket.receive_text()
-                        print(f"[DEBUG] WebSocket received raw message (length={len(msg)})")
                         data = json.loads(msg)
-                        print(f"[DEBUG] WebSocket message parsed keys={list(data.keys())}")
 
                         if data.get("text") is not None:
                             print(f"[DEBUG] Received text (top-level) user_id={user_id} text={data.get('text')!r}")
