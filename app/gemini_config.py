@@ -217,7 +217,7 @@ def get_live_config(config_data: UserConfigData) -> LiveConnectConfig:
         input_audio_transcription={},
         speech_config=SpeechConfig(
             voice_config=VoiceConfig(
-                prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Fenrir")
+                prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Aoede")
             )
         ),
         system_instruction=system_instruction,
