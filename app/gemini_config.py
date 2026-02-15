@@ -8,6 +8,10 @@ from google.genai.types import (
     PrebuiltVoiceConfig,
     FunctionDeclaration,
     Tool,
+    Modality,
+    AudioTranscriptionConfig,
+    Schema,
+    Type,
 )
 from user_config import UserConfigData
 
@@ -36,19 +40,19 @@ think_tool = Tool(
                 "IMPORTANT: Call this function ONLY ONCE per unique user input. "
                 "If a response indicates the request was already processed, do NOT call again."
             ),
-            parameters={
-                "type": "OBJECT",
-                "properties": {
-                    "user_input": {
-                        "type": "STRING",
-                        "description": (
+            parameters=Schema(
+                type=Type.OBJECT,
+                properties={
+                    "user_input": Schema(
+                        type=Type.STRING,
+                        description=(
                             "The exact user utterance to process. "
                             "Must be passed verbatim. Call only once per unique input."
                         ),
-                    }
+                    )
                 },
-                "required": ["user_input"],
-            },
+                required=["user_input"],
+            ),
         )
     ]
 )
@@ -59,16 +63,16 @@ end_conversation_tool = Tool(
             name="end_conversation",
             behavior=Behavior.BLOCKING,
             description="Use this tool when the user indicates they want to end the conversation.",
-            parameters={
-                "type": "OBJECT",
-                "properties": {
-                    "goodbye_message": {
-                        "type": "STRING",
-                        "description": "A friendly goodbye message to speak before ending the conversation.",
-                    }
+            parameters=Schema(
+                type=Type.OBJECT,
+                properties={
+                    "goodbye_message": Schema(
+                        type=Type.STRING,
+                        description="A friendly goodbye message to speak before ending the conversation.",
+                    )
                 },
-                "required": ["goodbye_message"],
-            },
+                required=["goodbye_message"],
+            ),
         )
     ]
 )
@@ -214,9 +218,9 @@ def get_live_config(config_data: UserConfigData) -> LiveConnectConfig:
     )
 
     return LiveConnectConfig(
-        response_modalities=["AUDIO"],
-        output_audio_transcription={},
-        input_audio_transcription={},
+        response_modalities=[Modality.AUDIO],
+        output_audio_transcription=AudioTranscriptionConfig(),
+        input_audio_transcription=AudioTranscriptionConfig(),
         speech_config=SpeechConfig(
             voice_config=VoiceConfig(
                 prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Aoede")
