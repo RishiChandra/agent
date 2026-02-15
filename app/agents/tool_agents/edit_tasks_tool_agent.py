@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 from database import execute_query, execute_update
 from psycopg2.extras import Json
 
-from ..openai_client import call_openai
+from ..gemini_client import call_gemini, gemini_response_to_openai_like
 from ..utils.task_extraction_utils import extract_tasks_from_chat_history
 
 class EditTasksToolAgent:
@@ -205,7 +205,7 @@ class EditTasksToolAgent:
                 },
             }
         }
-        response = call_openai(messages, [selecting_tool])
+        response = gemini_response_to_openai_like(call_gemini(messages, [selecting_tool]))
         arguments = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
         task_id = arguments["task_id"]
         new_status = arguments.get("status")

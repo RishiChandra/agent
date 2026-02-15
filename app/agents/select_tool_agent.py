@@ -1,4 +1,4 @@
-from .openai_client import call_openai
+from .gemini_client import call_gemini, gemini_response_to_openai_like
 
 class SelectToolAgent:
     tool_agents = {}
@@ -116,4 +116,5 @@ class SelectToolAgent:
                 },
             }
         }
-        return call_openai(messages, [selecting_tool])
+        response = call_gemini(messages, [selecting_tool])
+        return gemini_response_to_openai_like(response)

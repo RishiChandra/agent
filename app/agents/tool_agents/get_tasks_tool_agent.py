@@ -5,7 +5,7 @@ import sys
 import os
 from database import execute_query
 
-from ..openai_client import call_openai
+from ..gemini_client import call_gemini, gemini_response_to_openai_like
 
 class GetTasksToolAgent:
     name = "get_tasks_tool"
@@ -63,7 +63,7 @@ class GetTasksToolAgent:
                 },
             }
         }
-        response = call_openai(messages, [selecting_tool])
+        response = gemini_response_to_openai_like(call_gemini(messages, [selecting_tool]))
         arguments = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
         start_time_str = arguments["start_time"]
         end_time_str = arguments["end_time"]

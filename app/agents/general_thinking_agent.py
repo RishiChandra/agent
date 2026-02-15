@@ -4,8 +4,6 @@ import asyncio
 from .select_tool_agent import SelectToolAgent
 import json
 
-
-from .openai_client import call_openai
 from .tool_agents.get_tasks_tool_agent import GetTasksToolAgent
 from .tool_agents.create_tasks_tool_agent import CreateTasksToolAgent
 from .tool_agents.edit_tasks_tool_agent import EditTasksToolAgent

@@ -1,6 +1,7 @@
 import os
 from google import genai
 from google.genai.types import (
+    Behavior,
     LiveConnectConfig,
     SpeechConfig,
     VoiceConfig,
@@ -13,6 +14,7 @@ from user_config import UserConfigData
 # ===== Gemini config =====
 PROJECT_ID = "ai-pin-465902"
 LOCATION = "us-central1"
+# Live API (bidiGenerateContent): use Google AI model ID, not Vertex "gemini-live-*"
 MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
 
@@ -27,7 +29,7 @@ think_tool = Tool(
     function_declarations=[
         FunctionDeclaration(
             name="think_and_repeat_output",
-            behavior="NON_BLOCKING",
+            behavior=Behavior.NON_BLOCKING,
             description=(
                 "Primary personal system gateway. Use this tool for ANY request involving the user's personal data "
                 "or actions taken on their behalf (tasks, calendar, reminders, contacts, SMS, calls, confirmations, deferrals, status checks). "
@@ -55,7 +57,7 @@ end_conversation_tool = Tool(
     function_declarations=[
         FunctionDeclaration(
             name="end_conversation",
-            behavior="NON_BLOCKING",
+            behavior=Behavior.BLOCKING,
             description="Use this tool when the user indicates they want to end the conversation.",
             parameters={
                 "type": "OBJECT",
