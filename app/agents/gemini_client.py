@@ -47,7 +47,7 @@ def _openai_tools_to_gemini(tools):
                     types.FunctionDeclaration(
                         name=fn.get("name", "function"),
                         description=fn.get("description") or "",
-                        parameters=params,
+                        parameters=types.Schema(properties=params),
                     )
                 ]
             )
@@ -79,7 +79,7 @@ def call_gemini(messages, tools=None):
     gemini_tools = _openai_tools_to_gemini(tools)
     if gemini_tools:
         config_kw["tools"] = gemini_tools
-        config_kw["tool_config"] = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY"))
+        config_kw["tool_config"] = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode=types.FunctionCallingConfigMode.ANY))  # type: ignore
 
     config = types.GenerateContentConfig(**config_kw) if config_kw else None
     if config:
