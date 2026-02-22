@@ -343,10 +343,26 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                             continue
                                         else:
                                             processed_tool_inputs.add(normalized_input)
-                                            # Call think_and_repeat_output function
-                                            result = generalThinkingAgent.think(user_input, scratchpad.get_entries(), user_config)
+                                            # Call think_and_repeat_output function in a separate thread to avoid blocking the event loop
+                                            # This allows the agent to continue processing audio (like "One moment") while thinking
+                                            result = await asyncio.to_thread(
+                                                generalThinkingAgent.think, 
+                                                user_input, 
+                                                scratchpad.get_entries(), 
+                                                user_config
+                                            )
                                             print(f"generalThinkingAgent.think(user_input) {result}")
-                                            return_string = f"{result}."
+                                            
+                                            # Handle both string (error/duplicate) and dict (success) returns
+                                            if isinstance(result, dict):
+                                                return_string = result.get("result", "")
+                                            else:
+                                                return_string = str(result)
+                                                
+                                            # Ensure we end with a period if not present, for better TTS
+                                            if return_string and not return_string.endswith('.'):
+                                                return_string += "."
+                                                
                                             function_responses.append(
                                                 {
                                                     "name": name,

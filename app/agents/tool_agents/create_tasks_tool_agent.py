@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from database import execute_update
 from psycopg2.extras import Json
 
-from ..openai_client import call_openai
+from ..gemini_client import call_gemini, gemini_response_to_openai_like
 from enqueue.task_enqueue import enqueue_task
 
 class CreateTasksToolAgent:
@@ -121,7 +121,7 @@ class CreateTasksToolAgent:
                 },
             }
         }
-        response = call_openai(messages, [selecting_tool])
+        response = gemini_response_to_openai_like(call_gemini(messages, [selecting_tool]))
         arguments = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
         task_info = arguments["task_info"]
         time_to_execute_str = arguments["time_to_execute"]

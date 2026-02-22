@@ -1,15 +1,24 @@
+# Core
 fastapi
 uvicorn[standard]
 gunicorn
 python-dotenv
-google-genai<1.50.0
 websockets
 httpx
 requests
-psycopg2-binary
-openai
-azure-servicebus
 tzdata
+
+# Database
+psycopg2-binary
+
+# LLM / AI
+openai
+google-genai
+
+# Azure (device SDK has wheels; service SDK optional, see below)
+azure-servicebus
 azure-iot-device
-azure-iot-hub
-dotenv
+
+# Optional: install only if you need IoT Hub service-side (C2D, direct methods).
+# On macOS/Python 3.12+ it often fails to build due to uamqp requiring CMake.
+# pip install azure-iot-hub

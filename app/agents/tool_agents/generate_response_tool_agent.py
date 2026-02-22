@@ -1,5 +1,5 @@
 import json
-from ..openai_client import call_openai
+from ..gemini_client import call_gemini, gemini_response_to_openai_like
 
 class GenerateResponseToolAgent:
     name = "generate_response_tool"
@@ -79,13 +79,14 @@ class GenerateResponseToolAgent:
         
         messages.extend(cleaned_chat_history)
 
-        response = call_openai(messages)
+        response = call_gemini(messages)
         # Check if response is None or invalid
         if response is None:
-            raise ValueError("call_openai returned None - API call may have failed")
-        if not hasattr(response, 'choices') or not response.choices:
-            raise ValueError(f"Invalid response from call_openai: {response}")
-        if not hasattr(response.choices[0], 'message') or not hasattr(response.choices[0].message, 'content'):
-            raise ValueError(f"Invalid response structure from call_openai: {response}")
+            raise ValueError("call_gemini returned None - API call may have failed")
+        openai_like = gemini_response_to_openai_like(response)
+        if not hasattr(openai_like, 'choices') or not openai_like.choices:
+            raise ValueError(f"Invalid response from call_gemini: {response}")
+        if not hasattr(openai_like.choices[0], 'message') or not hasattr(openai_like.choices[0].message, 'content'):
+            raise ValueError(f"Invalid response structure from call_gemini: {response}")
         # Return the content string, not the ChatCompletion object
-        return response.choices[0].message.content
+        return openai_like.choices[0].message.content
