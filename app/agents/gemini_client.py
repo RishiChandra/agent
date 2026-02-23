@@ -47,7 +47,7 @@ def _openai_tools_to_gemini(tools):
                     types.FunctionDeclaration(
                         name=fn.get("name", "function"),
                         description=fn.get("description") or "",
-                        parameters=types.Schema(properties=params),
+                        parameters=params,
                     )
                 ]
             )

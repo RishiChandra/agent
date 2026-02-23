@@ -41,9 +41,9 @@ class EditTasksToolAgentTest(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures before each test method."""
-        # Skip tests if OpenAI credentials are not configured
+        # Skip tests if OpenAI credentials are not configured (tests use mocks, but check for consistency)
         if not are_openai_credentials_configured():
-            self.skipTest("Azure OpenAI credentials not configured")
+            self.skipTest("OpenAI credentials not configured (tests use mocks but check for consistency)")
         
         self.agent = EditTasksToolAgent()
         # Use UTC for tests to avoid tzdata dependency issues
@@ -99,15 +99,17 @@ class EditTasksToolAgentTest(unittest.TestCase):
     
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_query')
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_update')
-    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_openai')
-    def test_edit_task_status_to_completed(self, mock_call_openai, mock_execute_update, mock_execute_query):
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.gemini_response_to_openai_like')
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_gemini')
+    def test_edit_task_status_to_completed(self, mock_call_gemini, mock_gemini_response_to_openai_like, mock_execute_update, mock_execute_query):
         """Test that edit_tasks_tool_agent can mark a task as completed."""
         task_id = "test-task-1"
         task_info = {"info": "Take my medicine"}
         original_time = datetime.now(timezone.utc) + timedelta(hours=1)
         
-        # Mock OpenAI response for tool selection (extracting task_id, status)
-        mock_call_openai.return_value = MagicMock(
+        # Mock Gemini response for tool selection (extracting task_id, status)
+        mock_call_gemini.return_value = MagicMock()  # Return any mock, will be converted
+        mock_gemini_response_to_openai_like.return_value = MagicMock(
             choices=[MagicMock(
                 message=MagicMock(
                     tool_calls=[MagicMock(
@@ -178,8 +180,9 @@ class EditTasksToolAgentTest(unittest.TestCase):
     
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_query')
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_update')
-    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_openai')
-    def test_edit_task_defer_by_5_minutes(self, mock_call_openai, mock_execute_update, mock_execute_query):
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.gemini_response_to_openai_like')
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_gemini')
+    def test_edit_task_defer_by_5_minutes(self, mock_call_gemini, mock_gemini_response_to_openai_like, mock_execute_update, mock_execute_query):
         """Test that edit_tasks_tool_agent can defer a task by 5 minutes."""
         task_id = "test-task-1"
         task_info = {"info": "Take my medicine"}
@@ -188,11 +191,12 @@ class EditTasksToolAgentTest(unittest.TestCase):
         # Calculate expected deferred time (5 minutes later)
         expected_time = original_time + timedelta(minutes=5)
         
-        # Mock OpenAI response for tool selection (extracting task_id, time_to_execute)
+        # Mock Gemini response for tool selection (extracting task_id, time_to_execute)
         # Use UTC for test to avoid tzdata dependency
         expected_time_str = expected_time.isoformat()
         
-        mock_call_openai.return_value = MagicMock(
+        mock_call_gemini.return_value = MagicMock()  # Return any mock, will be converted
+        mock_gemini_response_to_openai_like.return_value = MagicMock(
             choices=[MagicMock(
                 message=MagicMock(
                     tool_calls=[MagicMock(
@@ -266,16 +270,18 @@ class EditTasksToolAgentTest(unittest.TestCase):
     
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_query')
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_update')
-    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_openai')
-    def test_edit_task_description(self, mock_call_openai, mock_execute_update, mock_execute_query):
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.gemini_response_to_openai_like')
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_gemini')
+    def test_edit_task_description(self, mock_call_gemini, mock_gemini_response_to_openai_like, mock_execute_update, mock_execute_query):
         """Test that edit_tasks_tool_agent can update task description."""
         task_id = "test-task-1"
         original_task_info = {"info": "Take my medicine"}
         new_task_info = "Take my vitamins"
         original_time = datetime.now(timezone.utc) + timedelta(hours=1)
         
-        # Mock OpenAI response for tool selection (extracting task_id, task_info)
-        mock_call_openai.return_value = MagicMock(
+        # Mock Gemini response for tool selection (extracting task_id, task_info)
+        mock_call_gemini.return_value = MagicMock()  # Return any mock, will be converted
+        mock_gemini_response_to_openai_like.return_value = MagicMock(
             choices=[MagicMock(
                 message=MagicMock(
                     tool_calls=[MagicMock(
@@ -344,8 +350,9 @@ class EditTasksToolAgentTest(unittest.TestCase):
     
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_query')
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_update')
-    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_openai')
-    def test_edit_task_only_updates_correct_task_id(self, mock_call_openai, mock_execute_update, mock_execute_query):
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.gemini_response_to_openai_like')
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_gemini')
+    def test_edit_task_only_updates_correct_task_id(self, mock_call_gemini, mock_gemini_response_to_openai_like, mock_execute_update, mock_execute_query):
         """Test that edit_tasks_tool_agent only updates the task that matches the user's request."""
         task_id_1 = "task-medicine"
         task_id_2 = "task-call"
@@ -355,8 +362,9 @@ class EditTasksToolAgentTest(unittest.TestCase):
         
         original_time = datetime.now(timezone.utc) + timedelta(hours=1)
         
-        # Mock OpenAI response - should select task_id_1 based on user saying "taking my medicine"
-        mock_call_openai.return_value = MagicMock(
+        # Mock Gemini response - should select task_id_1 based on user saying "taking my medicine"
+        mock_call_gemini.return_value = MagicMock()  # Return any mock, will be converted
+        mock_gemini_response_to_openai_like.return_value = MagicMock(
             choices=[MagicMock(
                 message=MagicMock(
                     tool_calls=[MagicMock(
@@ -443,8 +451,9 @@ class EditTasksToolAgentTest(unittest.TestCase):
     
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_query')
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_update')
-    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_openai')
-    def test_edit_task_with_multiple_tasks_selects_correct_one(self, mock_call_openai, mock_execute_update, mock_execute_query):
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.gemini_response_to_openai_like')
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_gemini')
+    def test_edit_task_with_multiple_tasks_selects_correct_one(self, mock_call_gemini, mock_gemini_response_to_openai_like, mock_execute_update, mock_execute_query):
         """Test that when multiple tasks are in chat history, the right one is selected based on user's mention."""
         task_id_1 = "task-medicine"
         task_id_2 = "task-call"
@@ -456,8 +465,9 @@ class EditTasksToolAgentTest(unittest.TestCase):
         
         original_time = datetime.now(timezone.utc) + timedelta(hours=1)
         
-        # Mock OpenAI response - should select task_id_2 based on user mentioning "call"
-        mock_call_openai.return_value = MagicMock(
+        # Mock Gemini response - should select task_id_2 based on user mentioning "call"
+        mock_call_gemini.return_value = MagicMock()  # Return any mock, will be converted
+        mock_gemini_response_to_openai_like.return_value = MagicMock(
             choices=[MagicMock(
                 message=MagicMock(
                     tool_calls=[MagicMock(
@@ -555,11 +565,13 @@ class EditTasksToolAgentTest(unittest.TestCase):
         self.assertEqual(params[-1], task_id_2, "Should update task_id_2 based on user's mention of 'call to mom'")
     
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_query')
-    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_openai')
-    def test_edit_task_fails_without_task_id(self, mock_call_openai, mock_execute_query):
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.gemini_response_to_openai_like')
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_gemini')
+    def test_edit_task_fails_without_task_id(self, mock_call_gemini, mock_gemini_response_to_openai_like, mock_execute_query):
         """Test that edit_tasks_tool_agent returns an error when no task_id is available."""
-        # Mock OpenAI response - no task_id available
-        mock_call_openai.return_value = MagicMock(
+        # Mock Gemini response - no task_id available
+        mock_call_gemini.return_value = MagicMock()  # Return any mock, will be converted
+        mock_gemini_response_to_openai_like.return_value = MagicMock(
             choices=[MagicMock(
                 message=MagicMock(
                     tool_calls=[MagicMock(
@@ -600,8 +612,9 @@ class EditTasksToolAgentTest(unittest.TestCase):
     
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_query')
     @patch('app.agents.tool_agents.edit_tasks_tool_agent.execute_update')
-    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_openai')
-    def test_edit_task_from_reminder_updates_correct_task(self, mock_call_openai, mock_execute_update, mock_execute_query):
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.gemini_response_to_openai_like')
+    @patch('app.agents.tool_agents.edit_tasks_tool_agent.call_gemini')
+    def test_edit_task_from_reminder_updates_correct_task(self, mock_call_gemini, mock_gemini_response_to_openai_like, mock_execute_update, mock_execute_query):
         """Test that when a reminder is sent, the task from the reminder is updated based on the reminder's task_id."""
         reminder_task_id = "reminder-task-1"
         other_task_id = "other-task-2"
@@ -612,11 +625,12 @@ class EditTasksToolAgentTest(unittest.TestCase):
         original_time = datetime.now(timezone.utc) + timedelta(minutes=10)
         expected_time = original_time + timedelta(minutes=5)
         
-        # Mock OpenAI response - should select the reminder task_id
+        # Mock Gemini response - should select the reminder task_id
         # Use UTC for test to avoid tzdata dependency
         expected_time_str = expected_time.isoformat()
         
-        mock_call_openai.return_value = MagicMock(
+        mock_call_gemini.return_value = MagicMock()  # Return any mock, will be converted
+        mock_gemini_response_to_openai_like.return_value = MagicMock(
             choices=[MagicMock(
                 message=MagicMock(
                     tool_calls=[MagicMock(

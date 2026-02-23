@@ -268,13 +268,21 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 while True:
                     data = await audio_manager.audio_queue.get()
                     # Always send the audio data to Gemini (identical to working example)
-                    await gemini_session.send_realtime_input(
-                        
-                        media={
-                            "data": data,
-                            "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}",
-                        }
-                    )
+                    try:
+                        # Add timeout for realtime input sending to prevent hang during connection closure
+                        await asyncio.wait_for(
+                            gemini_session.send_realtime_input(
+                                media={
+                                    "data": data,
+                                    "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}",
+                                }
+                            ),
+                            timeout=5.0
+                        )
+                    except (asyncio.TimeoutError, Exception) as e:
+                        print(f"⚠️ Timeout or error sending realtime input (connection may be closing): {e}")
+                        # Break the loop if connection is closing
+                        break
                     audio_manager.audio_queue.task_done()
 
             async def receive_and_play():
@@ -421,8 +429,16 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                     )
                                     gemini_function_responses.append(gemini_response)
                                 
-                                await gemini_session.send_tool_response(function_responses=gemini_function_responses)
-                                print("Finished sending function responses")
+                                try:
+                                    # Add timeout for tool response sending to prevent hang during connection closure
+                                    await asyncio.wait_for(
+                                        gemini_session.send_tool_response(function_responses=gemini_function_responses),
+                                        timeout=10.0
+                                    )
+                                    print("Finished sending function responses")
+                                except (asyncio.TimeoutError, Exception) as e:
+                                    print(f"⚠️ Timeout or error sending tool response (connection may be closing): {e}")
+                                    # Continue execution - connection may already be closing
                                 continue
 
                         server_content = response.server_content

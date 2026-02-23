@@ -149,6 +149,9 @@ class GeneralThinkingAgent:
         selected_tool = None
         
         while selected_tool_name != "generate_response_tool":
+            # Track if this is the initial iteration (before any tools have been executed)
+            is_initial_iteration = (total_tool_calls == 0)
+            
             # Get the tool selection response
             selected_tool_response = select_tool_agent.select_tool(chat_history)
             context_msg = " (loop)" if total_tool_calls > 0 else ""
@@ -168,9 +171,6 @@ class GeneralThinkingAgent:
                     raise KeyError(f"Tool '{tool_name}' not found in available tools: {list(self.tool_agents.keys())}")
             
             # Execute all selected tools sequentially
-            # Track if we should short-circuit, but only apply it after ALL tools are processed
-            should_short_circuit = False
-            
             for tool_name in tool_names:
                 # Check if we should stop
                 if tool_name == "generate_response_tool":
@@ -205,17 +205,6 @@ class GeneralThinkingAgent:
                 
                 chat_history.append({"role": "assistant", "name": selected_tool.get_tool_name(), "content": tool_response})
                 print(f"Chat history: {chat_history}")
-                
-                # Check for short-circuit, but don't break yet - process all tool calls first
-                # Only short-circuit if this is the last tool call OR if we have a single tool call
-                if len(tool_names) == 1 or tool_name == tool_names[-1]:
-                    if self._should_short_circuit_to_generate_response(tool_name, tool_response):
-                        should_short_circuit = True
-            
-            # Apply short-circuit after all tool calls are processed
-            if should_short_circuit:
-                selected_tool_name = "generate_response_tool"
-                selected_tool = self.tool_agents[selected_tool_name]
             
             # Break if we're generating response
             if selected_tool_name == "generate_response_tool":
