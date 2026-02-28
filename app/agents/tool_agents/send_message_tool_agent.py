@@ -76,7 +76,13 @@ class SendMessageToolAgent:
         }
         messages = [{"role": "system", "content": system_content}]
         response = gemini_response_to_openai_like(call_gemini(messages, [selecting_tool]))
-        arguments = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
+        tool_calls = getattr(response.choices[0].message, "tool_calls", None) if response.choices else None
+        if not tool_calls or len(tool_calls) == 0:
+            return json.dumps({
+                "success": False,
+                "error": "Could not extract message content from the user's request (model did not return a tool call).",
+            })
+        arguments = json.loads(tool_calls[0].function.arguments)
         content = (arguments.get("content") or "").strip()
         if not content:
             return json.dumps({

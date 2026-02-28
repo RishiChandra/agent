@@ -215,6 +215,13 @@ class GeneralThinkingAgent:
                 
                 chat_history.append({"role": "assistant", "name": selected_tool.get_tool_name(), "content": tool_response})
                 print(f"Chat history: {chat_history}")
+                
+                # Short-circuit to generate_response_tool when the tool completed successfully,
+                # so we don't call select_tool again (avoids extra API call and possible hang).
+                if self._should_short_circuit_to_generate_response(tool_name, tool_response):
+                    selected_tool_name = "generate_response_tool"
+                    selected_tool = self.tool_agents[selected_tool_name]
+                    break
             
             # Break if we're generating response
             if selected_tool_name == "generate_response_tool":

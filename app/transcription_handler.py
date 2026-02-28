@@ -36,8 +36,11 @@ class TranscriptionHandler:
         # Buffer audio transcription chunks instead of adding immediately
         self.scratchpad.buffer_audio_transcription("agent", output_text)
         
-        # Send to client for display
-        await self.websocket.send_text(json.dumps({"output_text": output_text}))
+        # Send to client for display (ignore send errors if connection is closing)
+        try:
+            await self.websocket.send_text(json.dumps({"output_text": output_text}))
+        except Exception:
+            pass  # Connection may be closed; avoid AssertionError in websockets drain
     
     async def handle_input_transcription(self, input_transcription) -> bool:
         """Handle input transcription (user speech) with echo filtering.
@@ -64,8 +67,11 @@ class TranscriptionHandler:
         # Buffer audio transcription chunks instead of adding immediately
         self.scratchpad.buffer_audio_transcription("user", input_text)
         
-        # Send to client for display
-        await self.websocket.send_text(json.dumps({"input_text": input_text}))
+        # Send to client for display (ignore send errors if connection is closing)
+        try:
+            await self.websocket.send_text(json.dumps({"input_text": input_text}))
+        except Exception:
+            pass  # Connection may be closed; avoid AssertionError in websockets drain
         return True
     
     def _is_echo(self, input_text: str) -> bool:
