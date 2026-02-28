@@ -9,11 +9,19 @@ from datetime import datetime
 from database import execute_query, execute_update, get_db_connection
 import psycopg2
 
-# Import enqueue function (with safe import to avoid circular dependencies)
+# Import enqueue functions (with safe import to avoid circular dependencies)
 try:
     from enqueue.task_enqueue import enqueue_task_safe
 except ImportError:
     enqueue_task_safe = None
+try:
+    from enqueue.edit_task_enqueue import (
+        reenqueue_task_after_edit_safe,
+        cancel_scheduled_task_for_task_id_safe,
+    )
+except ImportError:
+    reenqueue_task_after_edit_safe = None
+    cancel_scheduled_task_for_task_id_safe = None
 
 
 def get_tasks_by_user_id(user_id: str) -> List[Dict[str, Any]]:
@@ -28,7 +36,7 @@ def get_tasks_by_user_id(user_id: str) -> List[Dict[str, Any]]:
     """
     try:
         query = """
-            SELECT task_id, user_id, task_info, status, time_to_execute
+            SELECT task_id, user_id, task_info, status, time_to_execute, enqueue_sequence_id
             FROM tasks
             WHERE user_id = %s
             ORDER BY time_to_execute ASC NULLS LAST, task_id DESC
@@ -43,7 +51,8 @@ def get_tasks_by_user_id(user_id: str) -> List[Dict[str, Any]]:
                 "user_id": row["user_id"],
                 "task_info": row["task_info"] if row["task_info"] else None,
                 "status": row["status"],
-                "time_to_execute": row["time_to_execute"].isoformat() if row["time_to_execute"] else None
+                "time_to_execute": row["time_to_execute"].isoformat() if row["time_to_execute"] else None,
+                "enqueue_sequence_id": row.get("enqueue_sequence_id"),
             }
             tasks.append(task)
         
@@ -65,7 +74,7 @@ def get_task_by_id(task_id: str) -> Optional[Dict[str, Any]]:
     """
     try:
         query = """
-            SELECT task_id, user_id, task_info, status, time_to_execute
+            SELECT task_id, user_id, task_info, status, time_to_execute, enqueue_sequence_id
             FROM tasks
             WHERE task_id = %s
         """
@@ -80,7 +89,8 @@ def get_task_by_id(task_id: str) -> Optional[Dict[str, Any]]:
             "user_id": row["user_id"],
             "task_info": row["task_info"] if row["task_info"] else None,
             "status": row["status"],
-            "time_to_execute": row["time_to_execute"].isoformat() if row["time_to_execute"] else None
+            "time_to_execute": row["time_to_execute"].isoformat() if row["time_to_execute"] else None,
+            "enqueue_sequence_id": row.get("enqueue_sequence_id"),
         }
     except Exception as e:
         print(f"Error fetching task: {e}")
@@ -149,6 +159,15 @@ def create_task(
                 )
                 if enqueue_result:
                     task["enqueue_result"] = enqueue_result
+                    # Persist Service Bus sequence_id to task row when present (scheduled messages only)
+                    if enqueue_result.get("sequence_id") is not None:
+                        try:
+                            execute_update(
+                                "UPDATE tasks SET enqueue_sequence_id = %s WHERE task_id = %s",
+                                (enqueue_result["sequence_id"], task_id)
+                            )
+                        except Exception as update_err:
+                            print(f"Warning: Failed to update enqueue_sequence_id for task {task_id}: {update_err}")
                 else:
                     task["enqueue_warning"] = "Task created but enqueue failed (see server logs)"
             except Exception as e:
@@ -171,7 +190,8 @@ def update_task(
     task_id: str,
     task_info: Optional[Dict[str, Any]] = None,
     status: Optional[str] = None,
-    time_to_execute: Optional[str] = None
+    time_to_execute: Optional[str] = None,
+    reenqueue: bool = False,
 ) -> Dict[str, Any]:
     """
     Update an existing task.
@@ -181,6 +201,9 @@ def update_task(
         task_info: Optional task information dictionary to update
         status: Optional task status to update
         time_to_execute: Optional ISO 8601 datetime string to update
+        reenqueue: If True, cancel existing Service Bus scheduled message and re-enqueue
+                  with updated payload when time_to_execute or task_info changed; or
+                  cancel only when status is set to completed.
         
     Returns:
         Updated task dictionary
@@ -230,6 +253,23 @@ def update_task(
         updated_task = get_task_by_id(task_id)
         if updated_task is None:
             raise ValueError("Task not found after update")
+        
+        # Optionally sync Service Bus: cancel and/or re-enqueue with updated payload
+        if reenqueue and (reenqueue_task_after_edit_safe is not None or cancel_scheduled_task_for_task_id_safe is not None):
+            user_id = updated_task.get("user_id")
+            if user_id:
+                if status == "completed" and cancel_scheduled_task_for_task_id_safe:
+                    cancel_scheduled_task_for_task_id_safe(task_id, user_id)
+                elif (task_info is not None or time_to_execute is not None) and updated_task.get("status") != "completed" and reenqueue_task_after_edit_safe:
+                    time_iso = updated_task.get("time_to_execute")
+                    if hasattr(time_iso, "isoformat"):
+                        time_iso = time_iso.isoformat()
+                    reenqueue_task_after_edit_safe(
+                        task_id=task_id,
+                        user_id=user_id,
+                        task_info=updated_task.get("task_info"),
+                        time_to_execute=time_iso,
+                    )
         
         return updated_task
     except psycopg2.Error as e:

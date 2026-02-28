@@ -37,7 +37,7 @@ def get_today_date_strings():
     return today, today_readable
 
 
-def create_mock_enqueue_result(task_id=None, scheduled_time=None, success=True):
+def create_mock_enqueue_result(task_id=None, scheduled_time=None, success=True, sequence_id=12345):
     """
     Create a mock enqueue result dictionary.
     
@@ -45,6 +45,7 @@ def create_mock_enqueue_result(task_id=None, scheduled_time=None, success=True):
         task_id: Optional task ID (if None, will need to be set later)
         scheduled_time: Optional scheduled time (if None, will need to be set later)
         success: Whether the enqueue was successful (default: True)
+        sequence_id: Optional Service Bus sequence number (default: 12345); None for immediate send
     
     Returns:
         dict: Mock enqueue result
@@ -53,7 +54,8 @@ def create_mock_enqueue_result(task_id=None, scheduled_time=None, success=True):
         "success": success,
         "task_id": task_id,
         "scheduled_time": scheduled_time,
-        "message": "Task scheduled successfully" if success else "Task scheduling failed"
+        "message": "Task scheduled successfully" if success else "Task scheduling failed",
+        "sequence_id": sequence_id,
     }
 
 

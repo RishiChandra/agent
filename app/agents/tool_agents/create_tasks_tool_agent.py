@@ -215,6 +215,15 @@ class CreateTasksToolAgent:
                     time_to_execute=time_to_execute.isoformat()
                 )
                 print(f"Task enqueued to Service Bus: {enqueue_result}")
+                # Persist Service Bus sequence_id to task row when present (scheduled messages only)
+                if enqueue_result and enqueue_result.get("sequence_id") is not None:
+                    try:
+                        execute_update(
+                            'UPDATE tasks SET enqueue_sequence_id = %s WHERE task_id = %s',
+                            (enqueue_result["sequence_id"], task_id)
+                        )
+                    except Exception as update_err:
+                        print(f"Warning: Failed to update enqueue_sequence_id for task {task_id}: {update_err}")
             except Exception as e:
                 print(f"Warning: Failed to enqueue task to Service Bus: {e}")
                 # Continue even if enqueueing fails - task is already in database

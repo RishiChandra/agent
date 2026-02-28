@@ -5,6 +5,14 @@ from database import execute_query, execute_update
 from psycopg2.extras import Json
 
 from ..gemini_client import call_gemini, gemini_response_to_openai_like
+try:
+    from enqueue.edit_task_enqueue import (
+        reenqueue_task_after_edit_safe,
+        cancel_scheduled_task_for_task_id_safe,
+    )
+except ImportError:
+    reenqueue_task_after_edit_safe = None
+    cancel_scheduled_task_for_task_id_safe = None
 from ..utils.task_extraction_utils import extract_tasks_from_chat_history
 
 class EditTasksToolAgent:
@@ -370,6 +378,25 @@ class EditTasksToolAgent:
             
             updated_task = dict(updated_tasks[0])
             
+            # Service Bus: cancel existing scheduled message and/or re-enqueue with updated payload
+            if cancel_scheduled_task_for_task_id_safe and new_status == "completed":
+                cancel_scheduled_task_for_task_id_safe(task_id, user_id)
+            elif reenqueue_task_after_edit_safe and (new_time_to_execute_str or new_task_info) and updated_task.get("status") == "pending":
+                time_to_execute_iso = updated_task.get("time_to_execute")
+                if time_to_execute_iso is not None and hasattr(time_to_execute_iso, "isoformat"):
+                    time_to_execute_iso = time_to_execute_iso.isoformat()
+                elif time_to_execute_iso is not None:
+                    time_to_execute_iso = str(time_to_execute_iso)
+                try:
+                    reenqueue_task_after_edit_safe(
+                        task_id=task_id,
+                        user_id=user_id,
+                        task_info=updated_task.get("task_info"),
+                        time_to_execute=time_to_execute_iso,
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to re-enqueue task after edit: {e}")
+
             # Convert datetime to ISO format if present
             task_info = updated_task.get("task_info")
             time_to_execute = updated_task.get("time_to_execute")

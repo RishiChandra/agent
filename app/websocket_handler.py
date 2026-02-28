@@ -290,7 +290,6 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 # Flag to track if we should close after receiving the goodbye audio
                 should_close_after_audio = False
                 last_audio_received_time = None
-                
                 while True:
                     async for response in gemini_session.receive():
                         # retrieve continuously resumable session ID (identical to working example)
@@ -353,24 +352,26 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                             processed_tool_inputs.add(normalized_input)
                                             # Call think_and_repeat_output function in a separate thread to avoid blocking the event loop
                                             # This allows the agent to continue processing audio (like "One moment") while thinking
-                                            result = await asyncio.to_thread(
-                                                generalThinkingAgent.think, 
-                                                user_input, 
-                                                scratchpad.get_entries(), 
-                                                user_config
-                                            )
-                                            print(f"generalThinkingAgent.think(user_input) {result}")
-                                            
-                                            # Handle both string (error/duplicate) and dict (success) returns
-                                            if isinstance(result, dict):
-                                                return_string = result.get("result", "")
-                                            else:
-                                                return_string = str(result)
-                                                
+                                            try:
+                                                result = await asyncio.to_thread(
+                                                    generalThinkingAgent.think,
+                                                    user_input,
+                                                    scratchpad.get_entries(),
+                                                    user_config
+                                                )
+                                                print(f"✅ think() finished: {str(result)[:80]}...")
+                                                # Handle both string (error/duplicate) and dict (success) returns
+                                                if isinstance(result, dict):
+                                                    return_string = result.get("result", "")
+                                                else:
+                                                    return_string = str(result)
+                                            except Exception as e:
+                                                print(f"⚠️ think() failed: {e}")
+                                                traceback.print_exc()
+                                                return_string = "Sorry, something went wrong while processing that. Please try again."
                                             # Ensure we end with a period if not present, for better TTS
                                             if return_string and not return_string.endswith('.'):
                                                 return_string += "."
-                                                
                                             function_responses.append(
                                                 {
                                                     "name": name,
@@ -406,8 +407,9 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 
                             # Send function responses back to Gemini (only if we have actual responses)
                             if function_responses:
-                                print(f"Sending function responses: {function_responses}")
-                                print(f"function_responses: {function_responses[0]['response']}")
+                                print(f"📤 Sending tool response to Gemini ({len(function_responses)} response(s))...")
+                                first_result = function_responses[0].get("response", {}).get("result", "")
+                                print(f"   result preview: {(first_result[:80] + '...') if len(first_result) > 80 else first_result}")
                                 
                                 # Add function responses to scratchpad
                                 for func_response in function_responses:
@@ -518,11 +520,9 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             # Use TaskGroup to manage all the concurrent tasks
             try:
                 async with asyncio.TaskGroup() as tg:
-                    # Start all tasks within the TaskGroup context
                     tg.create_task(ws_reader())
                     tg.create_task(process_and_send_audio())
                     tg.create_task(receive_and_play())
-                    
                     # The TaskGroup will wait for all tasks to complete
                     # This ensures proper cleanup when the WebSocket connection ends
             except* Exception as eg:
