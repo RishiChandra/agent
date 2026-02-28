@@ -10,7 +10,8 @@ class SendMessageToolAgent:
     name = "send_message_tool"
     description = (
         "Send a message to the user's caretaker. Use this tool when the user explicitly asks to send a message "
-        "to their caretaker (e.g., 'send a message to my caretaker', 'text my caretaker that...', 'tell my caretaker...'). "
+        "to their caretaker or implies replying to them (e.g., 'send a message to my caretaker', 'text my caretaker that...', "
+        "'tell my caretaker...', 'tell her...', 'let him know...', 'reply to her...'). "
         "The tool finds the caretaker via the relationships table (user is patient, uid2) and writes the message to the messages table. "
         "Do NOT use for creating tasks or reminders; use create_tasks_tool for those."
     )

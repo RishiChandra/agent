@@ -76,7 +76,7 @@ class SelectToolAgent:
                     "   - After 'edit_tasks_tool' completes successfully → select 'generate_response_tool'\n"
                     "   - If 'edit_tasks_tool' returns 'success': false → select 'generate_response_tool' to inform the user of the error\n\n"
                     "5. **For SEND MESSAGE TO CARETAKER requests**:\n"
-                    "   - If the user asks to send a message to their caretaker (e.g., 'send a message to my caretaker', 'text my caretaker that...', 'tell my caretaker...') → select 'send_message_tool'\n"
+                    "   - If the user asks to send a message to their caretaker OR implies a reply to their caretaker (e.g., 'send a message to my caretaker', 'text my caretaker that...', 'tell my caretaker...', 'tell her...', 'let him know...', 'reply to her...', 'text her back...') → select 'send_message_tool'\n"
                     "   - After 'send_message_tool' completes → select 'generate_response_tool'\n\n"
                     "6. **For DELETE/REMOVE/CANCEL requests**:\n"
                     "   - CRITICAL: If the user explicitly asks to DELETE, REMOVE, or CANCEL a task (e.g., 'delete X', 'remove Y', 'cancel Z', 'delete that task', 'remove my reminder for X') → select 'delete_tasks_tool'\n"
