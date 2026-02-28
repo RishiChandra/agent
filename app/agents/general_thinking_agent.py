@@ -8,13 +8,14 @@ from .tool_agents.get_tasks_tool_agent import GetTasksToolAgent
 from .tool_agents.create_tasks_tool_agent import CreateTasksToolAgent
 from .tool_agents.edit_tasks_tool_agent import EditTasksToolAgent
 from .tool_agents.delete_tasks_tool_agent import DeleteTasksToolAgent
+from .tool_agents.send_message_tool_agent import SendMessageToolAgent
 from .tool_agents.generate_response_tool_agent import GenerateResponseToolAgent
 from .utils.scratchpad_utils import check_if_already_processed, build_chat_history_from_scratchpad
 
 class GeneralThinkingAgent:
     tool_agents = {}
     def __init__(self):
-        agents = [GetTasksToolAgent(), CreateTasksToolAgent(), EditTasksToolAgent(), DeleteTasksToolAgent(), GenerateResponseToolAgent()]
+        agents = [GetTasksToolAgent(), CreateTasksToolAgent(), EditTasksToolAgent(), DeleteTasksToolAgent(), SendMessageToolAgent(), GenerateResponseToolAgent()]
         for tool_agent in agents:
             self.tool_agents[tool_agent.get_tool_name()] = tool_agent
 
