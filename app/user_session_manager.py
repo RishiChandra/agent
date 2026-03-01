@@ -1,5 +1,5 @@
 from datetime import datetime, UTC
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 from zoneinfo import ZoneInfo
 from session_management_utils import get_session, create_session, update_session_status
 from database import get_user_by_id
@@ -12,12 +12,25 @@ from user_config import UserConfigData
 class UserSessionManager:
     """Helper class to manage user sessions and configuration for WebSocket connections."""
     
-    def __init__(self, user_id: str):
+    def __init__(
+        self,
+        user_id: str,
+        get_session_fn: Callable = get_session,
+        create_session_fn: Callable = create_session,
+        update_session_status_fn: Callable = update_session_status,
+        get_user_by_id_fn: Callable = get_user_by_id,
+    ):
         self.user_id = user_id
-        self.db_session = None
-        self.user_info = None
-        self.user_config: UserConfigData = None
-        self.config: LiveConnectConfig = None
+        # Injected dependencies (default to production implementations)
+        self._get_session = get_session_fn
+        self._create_session = create_session_fn
+        self._update_session_status = update_session_status_fn
+        self._get_user_by_id = get_user_by_id_fn
+
+        self.db_session: Optional[dict] = None
+        self.user_info: Optional[dict] = None
+        self.user_config: Optional[UserConfigData] = None
+        self.config: Optional[LiveConnectConfig] = None
         self.scratchpad = Scratchpad()
         
         # Initialize everything in the constructor
@@ -28,19 +41,19 @@ class UserSessionManager:
     
     def initialize_session(self) -> None:
         """Initialize or retrieve the database session for the user."""
-        self.db_session = get_session(self.user_id)
+        self.db_session = self._get_session(self.user_id)
         print(f"🔄 DB SESSION: {self.db_session}")
         
         if not self.db_session:
-            self.db_session = create_session(self.user_id)
+            self.db_session = self._create_session(self.user_id)
         else:
             print(f"🔄 SESSION FOUND FOR USER {self.user_id}")
             print(f"🔄 SESSION: {self.db_session}")
-            update_session_status(self.user_id, True)
+            self._update_session_status(self.user_id, True)
     
     def load_user_info(self) -> None:
         """Load user profile information from the database."""
-        self.user_info = get_user_by_id(self.user_id)
+        self.user_info = self._get_user_by_id(self.user_id)
         print(f"👤 User info: {self.user_info}")
     
     def _extract_user_name(self) -> str:
@@ -120,7 +133,6 @@ class UserSessionManager:
         """Update session status (for use in exception handlers).
         
         Args:
-            user_id: The user ID to update the session status for
             is_active: Whether the session is active or not
         """
-        update_session_status(self.user_id, is_active)
+        self._update_session_status(self.user_id, is_active)

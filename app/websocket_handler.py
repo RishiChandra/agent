@@ -53,6 +53,20 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         
         # Transcription handler for processing input/output transcriptions
         transcription_handler = TranscriptionHandler(scratchpad, websocket)
+
+        def commit_audio_buffer(source: str) -> None:
+            """Commit any buffered audio transcriptions for the given source."""
+            try:
+                scratchpad.commit_audio_buffer(source)
+            except Exception as e:
+                print(f"Warning: commit_audio_buffer failed for source={source!r}: {e}")
+
+        def add_to_scratchpad(source: str, format: str, content: str) -> None:
+            """Safely add an entry to the scratchpad."""
+            try:
+                scratchpad.add_entry(source=source, format=format, content=content)
+            except Exception as e:
+                print(f"Warning: add_to_scratchpad failed (source={source!r}, format={format!r}): {e}")
         
         # Keep the Gemini session alive for the entire WebSocket connection
         async with client.aio.live.connect(model=MODEL, config=config) as gemini_session:
