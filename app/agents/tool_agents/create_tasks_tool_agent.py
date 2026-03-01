@@ -2,7 +2,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from database import execute_update
+from database import execute_update, update_task_enqueue_sequence_id
 from psycopg2.extras import Json
 
 from ..gemini_client import call_gemini, gemini_response_to_openai_like
@@ -218,10 +218,7 @@ class CreateTasksToolAgent:
                 # Persist Service Bus sequence_id to task row when present (scheduled messages only)
                 if enqueue_result and enqueue_result.get("sequence_id") is not None:
                     try:
-                        execute_update(
-                            'UPDATE tasks SET enqueue_sequence_id = %s WHERE task_id = %s',
-                            (enqueue_result["sequence_id"], task_id)
-                        )
+                        update_task_enqueue_sequence_id(task_id, enqueue_result["sequence_id"])
                     except Exception as update_err:
                         print(f"Warning: Failed to update enqueue_sequence_id for task {task_id}: {update_err}")
             except Exception as e:

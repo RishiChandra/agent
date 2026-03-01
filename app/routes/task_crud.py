@@ -10,19 +10,13 @@ from database import execute_query, execute_update, get_db_connection
 import psycopg2
 
 # Import enqueue functions (with safe import to avoid circular dependencies)
-try:
-    from enqueue.task_enqueue import enqueue_task_safe
-except ImportError:
-    enqueue_task_safe = None
-try:
-    from enqueue.edit_task_enqueue import (
+
+from enqueue.task_enqueue import enqueue_task_safe
+
+from enqueue.edit_task_enqueue import (
         reenqueue_task_after_edit_safe,
         cancel_scheduled_task_for_task_id_safe,
     )
-except ImportError:
-    reenqueue_task_after_edit_safe = None
-    cancel_scheduled_task_for_task_id_safe = None
-
 
 def get_tasks_by_user_id(user_id: str) -> List[Dict[str, Any]]:
     """

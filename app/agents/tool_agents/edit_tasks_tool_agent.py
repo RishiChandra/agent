@@ -5,14 +5,12 @@ from database import execute_query, execute_update
 from psycopg2.extras import Json
 
 from ..gemini_client import call_gemini, gemini_response_to_openai_like
-try:
-    from enqueue.edit_task_enqueue import (
-        reenqueue_task_after_edit_safe,
-        cancel_scheduled_task_for_task_id_safe,
-    )
-except ImportError:
-    reenqueue_task_after_edit_safe = None
-    cancel_scheduled_task_for_task_id_safe = None
+
+from enqueue.edit_task_enqueue import (
+    reenqueue_task_after_edit_safe,
+    cancel_scheduled_task_for_task_id_safe,
+)
+
 from ..utils.task_extraction_utils import extract_tasks_from_chat_history
 
 class EditTasksToolAgent:
