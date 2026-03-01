@@ -118,7 +118,9 @@ def enqueue_task(
         queue_name: Name of the Service Bus queue (default: "q1")
         
     Returns:
-        Dictionary with success status and scheduling information
+        Dictionary with success status, scheduling information, and optional sequence_id.
+        For scheduled messages, sequence_id is the Service Bus 64-bit sequence number (int).
+        For immediate send, sequence_id is None (API does not return it).
         
     Raises:
         ValueError: If Service Bus is not configured or connection fails
@@ -149,24 +151,28 @@ def enqueue_task(
                 message = ServiceBusMessage(message_content)
                 
                 if scheduled_time:
-                    # Schedule the message for future delivery
-                    sender.schedule_messages(message, scheduled_time)
-                    print(f"✅ Task {task_id} scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                    # Schedule the message for future delivery.
+                    # schedule_messages returns List[int] of sequence numbers (one per message).
+                    sequence_numbers = sender.schedule_messages(message, scheduled_time)
+                    sequence_id = sequence_numbers[0] if sequence_numbers else None
+                    print(f"✅ Task {task_id} scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S UTC')}" + (f" (sequence_id={sequence_id})" if sequence_id is not None else ""))
                     return {
                         "success": True,
                         "task_id": task_id,
                         "scheduled_time": scheduled_time.isoformat(),
-                        "message": f"Task scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                        "message": f"Task scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                        "sequence_id": sequence_id,
                     }
                 else:
-                    # Send immediately
+                    # Send immediately. send_messages returns None (no sequence number in API).
                     sender.send_messages(message)
                     print(f"✅ Task {task_id} enqueued immediately")
                     return {
                         "success": True,
                         "task_id": task_id,
                         "scheduled_time": None,
-                        "message": "Task enqueued immediately"
+                        "message": "Task enqueued immediately",
+                        "sequence_id": None,
                     }
                     
     except Exception as e:

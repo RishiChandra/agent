@@ -115,6 +115,23 @@ def get_user_timezone(user_id: str) -> str:
     return "UTC"
 
 
+def update_task_enqueue_sequence_id(task_id: str, sequence_id) -> int:
+    """
+    Update the enqueue_sequence_id for a task (e.g. after enqueueing to Service Bus).
+
+    Args:
+        task_id: The task ID to update
+        sequence_id: The sequence ID from the queue (e.g. Service Bus)
+
+    Returns:
+        Number of rows affected
+    """
+    return execute_update(
+        "UPDATE tasks SET enqueue_sequence_id = %s WHERE task_id = %s",
+        (sequence_id, task_id),
+    )
+
+
 def get_user_by_id(user_id: str) -> dict:
     """
     Get full user profile by user_id.
