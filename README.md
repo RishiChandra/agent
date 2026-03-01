@@ -10,12 +10,15 @@ Ideally, all development is done in the venv and scoped into the particular feat
 
 ```python -m venv .venv``` if python is not installed, can use py (windows only)
 
-Start up the venv with ```.\.venv\Scripts\Activate.ps1```
+Start up the venv with ```. \.venv\Scripts\Activate.ps1```
+Or ```.\.venv\Scripts\activate.bat``` for Bash
 
 If this is first time using the venv run:
 ```pip install -r requirements.txt``` for python reqs.
 
 Deactivate with...```deactivate```
+
+Remember to set a venv in both the test folder and the root folder. Additionally a .env file
 
 ## Agent Developmet
 The Agent logic lives in the app dir. *This should eventually be renamed
