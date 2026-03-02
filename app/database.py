@@ -57,7 +57,8 @@ def execute_query(query, params=None):
         raise
     finally:
         if conn:
-            cursor.close()
+            if 'cursor' in locals():
+                cursor.close()
             conn.close()
 
 def execute_update(query, params=None):
@@ -92,7 +93,8 @@ def execute_update(query, params=None):
         raise
     finally:
         if conn:
-            cursor.close()
+            if 'cursor' in locals():
+                cursor.close()
             conn.close()
 
 
