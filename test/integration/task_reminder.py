@@ -4,11 +4,14 @@ import json
 import os
 import sys
 import contextlib
-from uuid import uuid4
 
 from dotenv import load_dotenv
 import uvicorn
 import websockets  # type: ignore[import]
+from websockets.exceptions import ConnectionClosed  # type: ignore[import]
+from openpyxl import Workbook, load_workbook  # type: ignore[import]
+from openpyxl.styles import Font, Alignment  # type: ignore[import]
+from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import]
 
 # Ensure project root and app package are on sys.path so this can be run
 # either from the repository root (python -m test.integration.task_reminder)
@@ -20,189 +23,275 @@ app_path = os.path.join(project_root, "app")
 if app_path not in sys.path:
     sys.path.insert(0, app_path)
 
-# Directory to store per-session transcription logs (alongside this test file)
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "test_output")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Load environment variables (including GOOGLE_API_KEY, DB settings, etc.) from the project .env
 load_dotenv(os.path.join(project_root, ".env"))
 
 from app.main import app
-import app.websocket_handler as app_websocket_handler
-from app.user_session_manager import UserSessionManager as RealUserSessionManager
-import app.database as db_module
-import session_management_utils as root_session_utils
-import websocket_handler as root_websocket_handler
 
 WS_HOST = "127.0.0.1"
 WS_PORT = 8765
 WS_URL_TEMPLATE = f"ws://{WS_HOST}:{WS_PORT}/ws/{{user_id}}"
 
-
-def _build_pending_task_payloads(now_iso: str) -> list[dict]:
-    """Build pending_task-style payloads that websocket_handler understands."""
-    return [
-        {
-            "pending_task": True,
-            "title": "Take my medicine",
-            "description": "Take your morning medication with a glass of water.",
-            "time_to_execute": now_iso,
-        },
-        {
-            "pending_task": True,
-            "title": "Review today's reminders",
-            "description": "Summarize all of the user's scheduled tasks and reminders for today.",
-            "time_to_execute": now_iso,
-        },
-        {
-            "pending_task": True,
-            "title": "Stretch break",
-            "description": "Stand up, stretch your legs and shoulders, and rest your eyes from screens.",
-            "time_to_execute": now_iso,
-        },
-    ]
+# Excel file path for test inputs/outputs (static file, not created at runtime)
+TEST_INPUTS_FILE = os.path.join(os.path.dirname(__file__), "test_inputs.xlsx")
 
 
-def _install_db_mocks() -> None:
-    """Patch database helpers so no real Postgres queries are executed."""
-
-    def fake_execute_query(query, params=None):
-        print(f"[MOCK execute_query] {query!r} {params!r}")
-        return []
-
-    def fake_execute_update(query, params=None):
-        print(f"[MOCK execute_update] {query!r} {params!r}")
-        return 1
-
-    # Patch both the app.database module and the root-level session_management_utils
-    db_module.execute_query = fake_execute_query  # type: ignore[assignment]
-    db_module.execute_update = fake_execute_update  # type: ignore[assignment]
-    root_session_utils.execute_query = fake_execute_query  # type: ignore[assignment]
-    root_session_utils.execute_update = fake_execute_update  # type: ignore[assignment]
 
 
-def _install_mock_user_session_manager() -> None:
-    """Replace UserSessionManager used by websocket_handler with a version that uses mock DB access."""
+def _read_test_inputs_from_excel() -> list[tuple[str, dict]]:
+    """Read test input payloads from the Excel file.
+    
+    Returns:
+        List of tuples (label, payload) for each test row
+    
+    Raises:
+        FileNotFoundError: If the Excel file doesn't exist
+        ValueError: If no test inputs are found in the file
+    """
+    if not os.path.exists(TEST_INPUTS_FILE):
+        raise FileNotFoundError(
+            f"Test inputs file not found: {TEST_INPUTS_FILE}\n"
+            f"Please create the file first by running:\n"
+            f"  python -m test.integration.create_test_inputs"
+        )
+    
+    wb = load_workbook(TEST_INPUTS_FILE)
+    ws: Worksheet = wb.active  # type: ignore[assignment]
+    
+    test_inputs = []
+    # Skip header row (row 1), start from row 2
+    for row in ws.iter_rows(min_row=2, values_only=False):
+        if not row[0].value:  # Skip empty rows
+            continue
+        
+        label = str(row[0].value)
+        # Read input string from Input column (column B, index 1)
+        input_text = str(row[1].value).strip() if row[1].value else ""
+        if not input_text:
+            print(f"Warning: Empty input for test '{label}', skipping...")
+            continue
+        
+        # Convert string input to payload dict format for websocket
+        # The websocket handler expects {"turns": {"message": "..."}} format
+        payload = {"turns": {"message": input_text}}
+        
+        test_inputs.append((label, payload))
+    
+    wb.close()
+    
+    if not test_inputs:
+        raise ValueError(
+            f"No valid test inputs found in {TEST_INPUTS_FILE}.\n"
+            f"Please add test inputs to the file. Each row should have:\n"
+            f"  - Test Label (column A)\n"
+            f"  - Input (column B) with a plain text string"
+        )
+    
+    print(f"Read {len(test_inputs)} test input(s) from {TEST_INPUTS_FILE}")
+    return test_inputs
 
-    def mock_get_session(user_id: str):
-        print(f"[MOCK get_session] user_id={user_id}")
-        return None
 
-    def mock_create_session(user_id: str):
-        print(f"[MOCK create_session] user_id={user_id}")
-        return {"user_id": user_id, "is_active": True}
-
-    def mock_update_status(user_id: str, is_active: bool):
-        print(f"[MOCK update_session_status] user_id={user_id}, is_active={is_active}")
-
-    def mock_get_user_by_id(user_id: str):
-        print(f"[MOCK get_user_by_id] user_id={user_id}")
-        return {
-            "user_id": user_id,
-            "first_name": "Test",
-            "last_name": "User",
-            "timezone": "UTC",
-        }
-
-    class TestUserSessionManager(RealUserSessionManager):
-        def __init__(self, user_id: str):
-            super().__init__(
-                user_id,
-                get_session_fn=mock_get_session,
-                create_session_fn=mock_create_session,
-                update_session_status_fn=mock_update_status,
-                get_user_by_id_fn=mock_get_user_by_id,
-            )
-
-    # Monkey-patch the classes that websocket handlers reference (both app.* and root imports)
-    app_websocket_handler.UserSessionManager = TestUserSessionManager  # type: ignore[assignment]
-    root_websocket_handler.UserSessionManager = TestUserSessionManager  # type: ignore[assignment]
-
-
-async def _run_single_session(user_id: str, label: str, payload: dict, follow_up_text: str | None = None) -> None:
-    """Open a websocket session, send one prompt (plus optional follow-up), then close."""
+async def _run_single_session(user_id: str, label: str, payload: dict) -> tuple[str, dict, str, str]:
+    """Open a websocket session, send one prompt then close.
+    
+    Returns:
+        Tuple of (label, payload, transcription_output, scratchpad)
+    """
     ws_url = WS_URL_TEMPLATE.format(user_id=user_id)
-    log_path = os.path.join(OUTPUT_DIR, f"{label}_{uuid4().hex}.log")
+    transcription_lines = []
+    agent_text_parts = []  # Collect all agent output chunks
 
+    scratchpad_entries = None
+    
     async with websockets.connect(ws_url) as ws:
-        with open(log_path, "w", encoding="utf-8") as log_file:
-            # Reader task: writes whatever websocket_handler sends (TranscriptionHandler outputs) to a log file
-            async def reader():
+        # Reader task: collects whatever websocket_handler sends (TranscriptionHandler outputs)
+        async def reader():
+            nonlocal scratchpad_entries, agent_text_parts
+            try:
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
                     except json.JSONDecodeError:
-                        log_file.write(f"RAW: {raw}\n")
-                        log_file.flush()
+                        # Skip non-JSON messages
+                        continue
+
+                    # Capture scratchpad message sent by server before closing
+                    if msg.get("type") == "scratchpad":
+                        scratchpad_entries = msg.get("scratchpad", [])
+                        continue
+
+                    # Skip audio messages (they're just noise in logs)
+                    if "audio" in msg:
                         continue
 
                     if "output_text" in msg:
-                        log_file.write(f"AGENT: {msg['output_text']}\n")
-                        log_file.flush()
+                        # Collect agent text chunks instead of creating separate lines
+                        agent_text_parts.append(msg['output_text'])
                     if "input_text" in msg:
-                        log_file.write(f"USER: {msg['input_text']}\n")
-                        log_file.flush()
+                        # When we see user input, finalize any pending agent text
+                        if agent_text_parts:
+                            combined_agent_text = " ".join(agent_text_parts)
+                            transcription_lines.append(f"AGENT: {combined_agent_text}")
+                            agent_text_parts = []
+                        line = f"USER: {msg['input_text']}"
+                        transcription_lines.append(line)
                     if msg.get("end_conversation"):
-                        log_file.write("END: Conversation ended by server\n")
-                        log_file.flush()
+                        # Finalize any pending agent text before ending
+                        if agent_text_parts:
+                            combined_agent_text = " ".join(agent_text_parts)
+                            transcription_lines.append(f"AGENT: {combined_agent_text}")
+                            agent_text_parts = []
+                        line = "END: Conversation ended by server"
+                        transcription_lines.append(line)
                         break
+            except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
+                # Expected when connection closes or task is cancelled
+                pass
+            except Exception:
+                # Silently ignore other errors
+                pass
 
-            reader_task = asyncio.create_task(reader())
+        reader_task = asyncio.create_task(reader())
 
-            # Send the pending_task payload
-            await ws.send(json.dumps(payload))
-            # Let the agent speak; tune this delay as needed
-            await asyncio.sleep(8)
+        # Send the text payload
+        await ws.send(json.dumps(payload))
+        # Let the agent speak; tune this delay as needed
+        await asyncio.sleep(30)
 
-            if follow_up_text:
-                follow_up_turn = {
-                    "turns": {
-                        "message": follow_up_text,
-                    },
-                    "turn_complete": True,
-                }
-                await ws.send(json.dumps(follow_up_turn))
-                await asyncio.sleep(10)
+        # Request scratchpad from server before closing
+        # Send a special message to request scratchpad
+        try:
+            await ws.send(json.dumps({"type": "request_scratchpad"}))
+            # Wait a bit for the server to respond with scratchpad
+            await asyncio.sleep(1.0)
+        except Exception:
+            pass  # Connection might already be closing
+        
+        reader_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader_task
 
-            reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reader_task
+    # Finalize any remaining agent text that wasn't followed by user input or end
+    if agent_text_parts:
+        combined_agent_text = " ".join(agent_text_parts)
+        transcription_lines.append(f"AGENT: {combined_agent_text}")
+
+    # Format scratchpad entries as a readable string
+    scratchpad_str = ""
+    if scratchpad_entries:
+        try:
+            # Format scratchpad entries as JSON for readability
+            scratchpad_str = json.dumps(scratchpad_entries, indent=2)
+        except Exception as e:
+            print(f"Warning: Failed to format scratchpad: {e}")
+            scratchpad_str = str(scratchpad_entries)
+    else:
+        scratchpad_str = ""
+
+    transcription_output = "\n".join(transcription_lines)
+    return (label, payload, transcription_output, scratchpad_str)
 
 
-async def _websocket_client_test(user_id: str) -> None:
+async def _websocket_client_test(user_id: str) -> list[tuple[str, dict, str, str]]:
     """Connect to the FastAPI websocket endpoint and exercise the full agent stack.
 
+    Reads test inputs from Excel file and runs tests for each payload.
     Opens a fresh websocket (and thus Gemini) session for each prompt, running them serially.
+    
+    Returns:
+        List of tuples (label, payload, transcription_output, scratchpad) for each test session.
     """
-    now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    pending_task_payloads = _build_pending_task_payloads(now_iso)
+    test_inputs = _read_test_inputs_from_excel()
+    test_results = []
 
-    # Run three separate sessions (one per payload) sequentially.
-    await _run_single_session(
-        user_id=user_id,
-        label="take_my_medicine",
-        payload=pending_task_payloads[0],
-        follow_up_text="I finished taking my medicine. Please mark that task complete in my task list.",
-    )
+    # Run tests for each input from the Excel file
+    for label, payload in test_inputs:
+        result = await _run_single_session(
+            user_id=user_id,
+            label=label,
+            payload=payload,
+        )
+        test_results.append(result)
 
-    await _run_single_session(
-        user_id=user_id,
-        label="review_todays_reminders",
-        payload=pending_task_payloads[1],
-    )
+    return test_results
 
-    await _run_single_session(
-        user_id=user_id,
-        label="stretch_break",
-        payload=pending_task_payloads[2],
-    )
+
+def _write_results_to_excel(test_results: list[tuple[str, dict, str, str]]) -> str:
+    """Write transcription outputs and scratchpad back to the Excel file.
+    
+    Updates the Transcription Output column (column C) and Scratchpad column (column D) for each test row.
+    
+    Args:
+        test_results: List of tuples (label, payload, transcription_output, scratchpad)
+    
+    Returns:
+        Path to the Excel file
+    """
+    if not os.path.exists(TEST_INPUTS_FILE):
+        raise FileNotFoundError(
+            f"Test inputs file not found: {TEST_INPUTS_FILE}\n"
+            f"Please create the file first by running:\n"
+            f"  python -m test.integration.create_test_inputs"
+        )
+    
+    wb = load_workbook(TEST_INPUTS_FILE)
+    ws: Worksheet = wb.active  # type: ignore[assignment]
+    
+    # Create mappings of label to transcription output and scratchpad
+    transcription_map = {label: transcription for label, _, transcription, _ in test_results}
+    scratchpad_map = {label: scratchpad for label, _, _, scratchpad in test_results}
+    
+    # Update transcription outputs (column C, index 3) and scratchpad (column D, index 4)
+    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=False), start=2):
+        if not row[0].value:  # Skip empty rows
+            continue
+        
+        label = str(row[0].value)
+        if label in transcription_map:
+            # Update the Transcription Output column (column C, index 3)
+            try:
+                transcription_cell = ws.cell(row=row_idx, column=3)
+                transcription_cell.value = transcription_map[label]  # type: ignore[assignment]
+                transcription_cell.alignment = Alignment(wrap_text=True, vertical="top")
+            except Exception:
+                # If cell is merged, try to unmerge or access parent cell
+                # For now, skip if there's an issue
+                pass
+        
+        if label in scratchpad_map:
+            # Update the Scratchpad column (column D, index 4)
+            try:
+                scratchpad_cell = ws.cell(row=row_idx, column=4)
+                scratchpad_cell.value = scratchpad_map[label]  # type: ignore[assignment]
+                scratchpad_cell.alignment = Alignment(wrap_text=True, vertical="top")
+            except Exception:
+                # If cell is merged, try to unmerge or access parent cell
+                # For now, skip if there's an issue
+                pass
+    
+    # Ensure column widths are set
+    ws.column_dimensions["C"].width = 80  # Transcription Output
+    ws.column_dimensions["D"].width = 80  # Scratchpad
+    
+    # Set header for scratchpad column if it doesn't exist
+    try:
+        header_cell = ws.cell(row=1, column=4)
+        if header_cell.value is None:
+            header_cell.value = "Scratchpad"  # type: ignore[assignment]
+            header_cell.font = Font(bold=True)
+    except Exception:
+        # If cell is merged or inaccessible, skip header update
+        pass
+    
+    wb.save(TEST_INPUTS_FILE)
+    wb.close()
+    return TEST_INPUTS_FILE
 
 
 async def run_server_and_test() -> None:
     """Start uvicorn in-process and run the websocket client test against it."""
-    # Install DB and session manager mocks so no real Postgres access occurs
-    _install_db_mocks()
-    _install_mock_user_session_manager()
+    test_user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
 
     config = uvicorn.Config(app, host=WS_HOST, port=WS_PORT, log_level="info", ws="websockets")
     server = uvicorn.Server(config)
@@ -212,7 +301,12 @@ async def run_server_and_test() -> None:
     await asyncio.sleep(1.5)
 
     try:
-        await _websocket_client_test(user_id="test-user-id")
+        test_results = await _websocket_client_test(user_id=test_user_id)
+        excel_path = _write_results_to_excel(test_results)
+        print(f"\n✓ Test results saved to Excel file: {excel_path}")
+    except (FileNotFoundError, ValueError) as e:
+        print(f"\n✗ Error: {e}")
+        return
     finally:
         server.should_exit = True
         await server_task
@@ -225,8 +319,7 @@ def main() -> None:
         python -m test.integration.task_reminder
 
     This will start the FastAPI/uvicorn server in-process, open a websocket
-    connection to `/ws/{user_id}`, send pending-task reminders, and then a
-    follow-up user message that should exercise `general_thinking_agent` and
+    connection to `/ws/{user_id}`, send a user message that should exercise `general_thinking_agent` and
     downstream agentic tools. All agent speech transcriptions are printed.
     """
     asyncio.run(run_server_and_test())
