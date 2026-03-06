@@ -40,14 +40,15 @@ from app.database import execute_update
 load_dotenv(os.path.join(project_root, ".env"))
 
 # Same pattern as test_task_reminder: user + WebSocket URL
-USER_ID = os.getenv("TEST_PENDING_USER_ID", "4dd16650-c57a-44c4-b530-fc1c15d50e45")
+USER_ID = os.getenv("TEST_PENDING_USER_ID", "2ba330c0-a999-46f8-ba2c-855880bdcf5b")
+SENDER_ID = "4dd16650-c57a-44c4-b530-fc1c15d50e45"
 # If set, send initial message in Azure IoT Hub / ESP32 format (turns as JSON string)
 USE_IOT_HUB_INIT = os.getenv("USE_IOT_HUB_INIT", "1").lower() in ("1", "true", "yes")
 # Chat to attach the test message to (must exist or use a test-only chat_id)
 TEST_CHAT_ID = os.getenv("TEST_PENDING_CHAT_ID", "550e8400-e29b-41d4-a716-446655440000")
 WS_URI = (
-    # f"ws://localhost:8000/ws/{USER_ID}"
-    f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
+    f"ws://localhost:8000/ws/{USER_ID}"
+    # f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
 )
 
 FORMAT = pyaudio.paInt16
@@ -88,7 +89,7 @@ def build_iot_hub_init():
 def insert_test_pending_message(
     user_id: str = USER_ID,
     chat_id: str = TEST_CHAT_ID,
-    content: str = "Test pending message for WebSocket.",
+    content: str = "How is your day going?",
 ) -> str:
     """
     Insert a new row into messages and a new row into pending_text_message_jobs
@@ -102,7 +103,7 @@ def insert_test_pending_message(
         INSERT INTO messages (chat_id, message_id, sender_id, content, created_at, is_read)
         VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s::timestamptz, false)
         """,
-        (chat_id, message_id, user_id, content, created_at),
+        (chat_id, message_id, SENDER_ID, content, created_at),
     )
     # Server's get_pending_messages_for_user JOINs on p.message_id; table must have (user_id, message_id).
     execute_update(
@@ -259,22 +260,18 @@ async def run_websocket_client():
         audio_mgr.cleanup()
 
 
-async def main_loop():
+async def run_test():
     try:
-        while True:
-            is_active = await check_is_active(USER_ID)
+        is_active = await check_is_active(USER_ID)
 
-            if is_active:
-                print("⏳ is_active = TRUE → deferring 60s")
-                await asyncio.sleep(60)
-                continue
-            else:
-                print("✅ is_active = FALSE (or no row) → inserting test message + pending job, then starting WebSocket client...")
-                await asyncio.to_thread(insert_test_pending_message)
-                await run_websocket_client()
+        if is_active:
+            print("⏳ is_active = TRUE → deferring 60s")
+            await asyncio.sleep(60)
+        else:
+            print("✅ is_active = FALSE (or no row) → inserting test message + pending job, then starting WebSocket client...")
+            await asyncio.to_thread(insert_test_pending_message)
+            await run_websocket_client()
 
-            print("ℹ️ WebSocket session ended → recheck in 15s")
-            await asyncio.sleep(15)
 
     except KeyboardInterrupt:
         print("\n🛑 Stopping service...")
@@ -282,7 +279,7 @@ async def main_loop():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main_loop())
+        asyncio.run(run_test())
     except Exception as e:
         print(f"Unhandled error: {e}")
         sys.exit(1)
