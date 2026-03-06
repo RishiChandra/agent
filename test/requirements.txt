@@ -10,3 +10,4 @@ requests
 openai
 pytest
 psycopg2
+openpyxl

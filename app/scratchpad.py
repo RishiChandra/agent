@@ -94,6 +94,14 @@ class Scratchpad:
         """
         return self.entries
     
+    def clear(self) -> None:
+        """Clear all scratchpad entries and audio buffers."""
+        self.entries = []
+        self.audio_buffers = {
+            "user": "",
+            "agent": ""
+        }
+    
     def __repr__(self) -> str:
         """String representation of the scratchpad."""
         return f"Scratchpad(entries={len(self.entries)})"

@@ -127,6 +127,23 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             await audio_manager.interrupt()
                             continue
 
+                        # Handle scratchpad request
+                        if data.get("type") == "request_scratchpad":
+                            print("📋 Client requested scratchpad")
+                            if session_manager:
+                                try:
+                                    session_manager.scratchpad.commit_audio_buffer("user")
+                                    session_manager.scratchpad.commit_audio_buffer("agent")
+                                    scratchpad_entries = session_manager.scratchpad.get_entries()
+                                    await websocket.send_json({
+                                        "type": "scratchpad",
+                                        "scratchpad": scratchpad_entries
+                                    })
+                                    print(f"✅ Sent scratchpad with {len(scratchpad_entries)} entries")
+                                except Exception as send_error:
+                                    print(f"Warning: Failed to send scratchpad: {send_error}")
+                            continue
+
                         # --- pending_message true: get messages from DB and ask AI to tell the user about incoming messages ---
                         # ESP32 may send this inside turns as a JSON string: {"command":"start_websocket","reason":"text_message","pending_messages":true,...}
                         parsed_turns = None
@@ -554,6 +571,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             session_manager.scratchpad.commit_audio_buffer("user")
             session_manager.scratchpad.commit_audio_buffer("agent")
             print(f"Scratchpad: {session_manager.scratchpad.get_entries()}")
+            # Clear the scratchpad before closing the session
+            session_manager.scratchpad.clear()
             session_manager.update_user_session_status(False)
         
         if isinstance(e, WebSocketDisconnect):
