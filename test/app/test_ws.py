@@ -3,6 +3,8 @@ import websockets
 import json
 import base64
 import pyaudio
+import math
+import struct
 from collections import deque
 import signal
 import sys
@@ -13,6 +15,46 @@ CHANNELS = 1
 INPUT_RATE = 16000   # matches Gemini SEND_SAMPLE_RATE
 OUTPUT_RATE = 24000  # matches Gemini RECEIVE_SAMPLE_RATE
 CHUNK = 512
+
+TONE_RATE = 24000  # sample rate for generated tones
+
+def _generate_tone(freq: float, duration: float, rate: int = TONE_RATE, fade_ms: int = 10) -> bytes:
+    """Generate a sine-wave tone as PCM int16 bytes with short fade in/out."""
+    num_samples = int(rate * duration)
+    fade_samples = int(rate * fade_ms / 1000)
+    samples = []
+    for i in range(num_samples):
+        t = i / rate
+        amplitude = 32767 * 0.5
+        sample = amplitude * math.sin(2 * math.pi * freq * t)
+        # fade in
+        if i < fade_samples:
+            sample *= i / fade_samples
+        # fade out
+        elif i >= num_samples - fade_samples:
+            sample *= (num_samples - i) / fade_samples
+        samples.append(int(sample))
+    return struct.pack(f"<{num_samples}h", *samples)
+
+def _connection_ring(p: pyaudio.PyAudio):
+    """Play a two-tone ascending chime (connection)."""
+    stream = p.open(format=FORMAT, channels=CHANNELS, rate=TONE_RATE, output=True)
+    try:
+        stream.write(_generate_tone(880, 0.12))   # A5
+        stream.write(_generate_tone(1174, 0.18))  # D6
+    finally:
+        stream.stop_stream()
+        stream.close()
+
+def _disconnection_ring(p: pyaudio.PyAudio):
+    """Play a two-tone descending chime (disconnection)."""
+    stream = p.open(format=FORMAT, channels=CHANNELS, rate=TONE_RATE, output=True)
+    try:
+        stream.write(_generate_tone(1174, 0.12))  # D6
+        stream.write(_generate_tone(587, 0.22))   # D5
+    finally:
+        stream.stop_stream()
+        stream.close()
 
 class AudioManager:
     def __init__(self):
@@ -95,8 +137,11 @@ async def test_ws():
     try:
         await audio_mgr.init()
         
+        disconnection_played = False
+
         async with websockets.connect(uri) as ws:
             print("✅ Connected to FastAPI WebSocket")
+            await asyncio.to_thread(_connection_ring, audio_mgr.p)
 
             async def send_audio():
                 """Continuously capture mic and send to server"""
@@ -113,6 +158,7 @@ async def test_ws():
                         break
 
             async def recv_audio():
+                nonlocal disconnection_played
                 """Receive Gemini audio and play through speakers"""
                 while audio_mgr.is_running:
                     try:
@@ -137,6 +183,8 @@ async def test_ws():
                             
                     except websockets.exceptions.ConnectionClosed:
                         print("❌ WebSocket connection closed")
+                        disconnection_played = True
+                        await asyncio.to_thread(_disconnection_ring, audio_mgr.p)
                         break
                     except Exception as e:
                         print(f"Error in recv_audio: {e}")
@@ -144,7 +192,11 @@ async def test_ws():
 
             # Run both tasks concurrently
             await asyncio.gather(send_audio(), recv_audio())
-            
+
+        if not disconnection_played:
+            await asyncio.to_thread(_disconnection_ring, audio_mgr.p)
+        print("🔔 Disconnected from WebSocket")
+
     except (ConnectionRefusedError, OSError) as e:
         print(f"❌ Connection refused. Make sure the FastAPI server is running. Error: {e}")
     except Exception as e:

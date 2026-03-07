@@ -24,6 +24,8 @@ import os
 import json
 import base64
 import uuid
+import math
+import struct
 from datetime import datetime, timezone
 from collections import deque
 
@@ -56,6 +58,43 @@ CHANNELS = 1
 INPUT_RATE = 16000
 OUTPUT_RATE = 24000
 CHUNK = 512
+TONE_RATE = 24000
+
+
+def _generate_tone(freq: float, duration: float, rate: int = TONE_RATE, fade_ms: int = 10) -> bytes:
+    num_samples = int(rate * duration)
+    fade_samples = int(rate * fade_ms / 1000)
+    samples = []
+    for i in range(num_samples):
+        t = i / rate
+        amplitude = 32767 * 0.5
+        sample = amplitude * math.sin(2 * math.pi * freq * t)
+        if i < fade_samples:
+            sample *= i / fade_samples
+        elif i >= num_samples - fade_samples:
+            sample *= (num_samples - i) / fade_samples
+        samples.append(int(sample))
+    return struct.pack(f"<{num_samples}h", *samples)
+
+
+def _connection_ring(p: pyaudio.PyAudio):
+    stream = p.open(format=FORMAT, channels=CHANNELS, rate=TONE_RATE, output=True)
+    try:
+        stream.write(_generate_tone(880, 0.12))
+        stream.write(_generate_tone(1174, 0.18))
+    finally:
+        stream.stop_stream()
+        stream.close()
+
+
+def _disconnection_ring(p: pyaudio.PyAudio):
+    stream = p.open(format=FORMAT, channels=CHANNELS, rate=TONE_RATE, output=True)
+    try:
+        stream.write(_generate_tone(1174, 0.12))
+        stream.write(_generate_tone(587, 0.22))
+    finally:
+        stream.stop_stream()
+        stream.close()
 
 
 def build_pending_message_init():
@@ -206,7 +245,7 @@ async def send_audio(ws, audio_mgr: AudioManager):
             break
 
 
-async def recv_audio(ws, audio_mgr: AudioManager):
+async def recv_audio(ws, audio_mgr: AudioManager, on_disconnected=None):
     import websockets as ws_lib
 
     while audio_mgr.is_running:
@@ -228,6 +267,8 @@ async def recv_audio(ws, audio_mgr: AudioManager):
                 print(f"❌ Server error: {data['error']}")
         except ws_lib.exceptions.ConnectionClosed:
             print("❌ WebSocket closed")
+            if on_disconnected:
+                await on_disconnected()
             break
         except Exception as e:
             print(f"Error in recv_audio: {e}")
@@ -241,8 +282,16 @@ async def run_websocket_client():
     try:
         await audio_mgr.init()
 
+        disconnection_played = False
+
+        async def play_disconnection():
+            nonlocal disconnection_played
+            disconnection_played = True
+            await asyncio.to_thread(_disconnection_ring, audio_mgr.p)
+
         async with websockets.connect(WS_URI) as ws:
             print(f"🚀 Connected to WebSocket → {WS_URI}")
+            await asyncio.to_thread(_connection_ring, audio_mgr.p)
 
             init_msg = build_iot_hub_init() if USE_IOT_HUB_INIT else build_pending_message_init()
             init_str = json.dumps(init_msg)
@@ -251,8 +300,12 @@ async def run_websocket_client():
 
             await asyncio.gather(
                 send_audio(ws, audio_mgr),
-                recv_audio(ws, audio_mgr),
+                recv_audio(ws, audio_mgr, on_disconnected=play_disconnection),
             )
+
+        if not disconnection_played:
+            await asyncio.to_thread(_disconnection_ring, audio_mgr.p)
+        print("🔔 Disconnected from WebSocket")
 
     except Exception as e:
         print(f"WebSocket error: {e}")
