@@ -9,34 +9,24 @@ import websockets
 import pyaudio
 from dotenv import load_dotenv
 
-# Import session management utilities
-# Add the app directory to the Python path to enable imports like "from database import ..."
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 sys.path.insert(0, os.path.join(project_root, 'app'))
 sys.path.insert(0, project_root)
 from app.session_management_utils import get_session
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import (
+    FORMAT, CHANNELS, INPUT_RATE, OUTPUT_RATE, CHUNK,
+    _connection_ring, _disconnection_ring,
+)
 
-# ================================
-# Load .env variables
-# ================================
 load_dotenv()
 
-# ================================
-# Constants (hardcoded user + URL)
-# ================================
 USER_ID = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
 TASK_ID = "1888b064-96aa-4bce-bbbf-87e98f491e2a"
 WS_URI = (
     f"ws://localhost:8000/ws/{USER_ID}"
     #f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
 )
-
-# ===== Audio Config =====
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-INPUT_RATE = 16000
-OUTPUT_RATE = 24000
-CHUNK = 512
 
 
 class AudioManager:
@@ -146,7 +136,7 @@ async def send_audio(ws, audio_mgr: AudioManager):
             break
 
 
-async def recv_audio(ws, audio_mgr: AudioManager):
+async def recv_audio(ws, audio_mgr: AudioManager, on_disconnected=None):
     import websockets as ws_lib
 
     while audio_mgr.is_running:
@@ -168,6 +158,8 @@ async def recv_audio(ws, audio_mgr: AudioManager):
                 print(f"❌ Server error: {data['error']}")
         except ws_lib.exceptions.ConnectionClosed:
             print("❌ WebSocket closed")
+            if on_disconnected:
+                await on_disconnected()
             break
         except Exception as e:
             print(f"Error in recv_audio: {e}")
@@ -181,8 +173,16 @@ async def run_websocket_client():
     try:
         await audio_mgr.init()
 
+        disconnection_played = False
+
+        async def play_disconnection():
+            nonlocal disconnection_played
+            disconnection_played = True
+            await asyncio.to_thread(_disconnection_ring, audio_mgr.p)
+
         async with websockets.connect(WS_URI) as ws:
             print(f"🚀 Connected to WebSocket → {WS_URI}")
+            await asyncio.to_thread(_connection_ring, audio_mgr.p)
 
             init_msg = {
                 "turns": {
@@ -201,8 +201,12 @@ async def run_websocket_client():
 
             await asyncio.gather(
                 send_audio(ws, audio_mgr),
-                recv_audio(ws, audio_mgr),
+                recv_audio(ws, audio_mgr, on_disconnected=play_disconnection),
             )
+
+        if not disconnection_played:
+            await asyncio.to_thread(_disconnection_ring, audio_mgr.p)
+        print("🔔 Disconnected from WebSocket")
 
     except Exception as e:
         print(f"WebSocket error: {e}")

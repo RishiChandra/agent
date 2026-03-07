@@ -1,60 +1,18 @@
 import asyncio
+import os
 import websockets
 import json
 import base64
 import pyaudio
-import math
-import struct
 from collections import deque
 import signal
 import sys
 
-# ===== Audio Config =====
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-INPUT_RATE = 16000   # matches Gemini SEND_SAMPLE_RATE
-OUTPUT_RATE = 24000  # matches Gemini RECEIVE_SAMPLE_RATE
-CHUNK = 512
-
-TONE_RATE = 24000  # sample rate for generated tones
-
-def _generate_tone(freq: float, duration: float, rate: int = TONE_RATE, fade_ms: int = 10) -> bytes:
-    """Generate a sine-wave tone as PCM int16 bytes with short fade in/out."""
-    num_samples = int(rate * duration)
-    fade_samples = int(rate * fade_ms / 1000)
-    samples = []
-    for i in range(num_samples):
-        t = i / rate
-        amplitude = 32767 * 0.5
-        sample = amplitude * math.sin(2 * math.pi * freq * t)
-        # fade in
-        if i < fade_samples:
-            sample *= i / fade_samples
-        # fade out
-        elif i >= num_samples - fade_samples:
-            sample *= (num_samples - i) / fade_samples
-        samples.append(int(sample))
-    return struct.pack(f"<{num_samples}h", *samples)
-
-def _connection_ring(p: pyaudio.PyAudio):
-    """Play a two-tone ascending chime (connection)."""
-    stream = p.open(format=FORMAT, channels=CHANNELS, rate=TONE_RATE, output=True)
-    try:
-        stream.write(_generate_tone(880, 0.12))   # A5
-        stream.write(_generate_tone(1174, 0.18))  # D6
-    finally:
-        stream.stop_stream()
-        stream.close()
-
-def _disconnection_ring(p: pyaudio.PyAudio):
-    """Play a two-tone descending chime (disconnection)."""
-    stream = p.open(format=FORMAT, channels=CHANNELS, rate=TONE_RATE, output=True)
-    try:
-        stream.write(_generate_tone(1174, 0.12))  # D6
-        stream.write(_generate_tone(587, 0.22))   # D5
-    finally:
-        stream.stop_stream()
-        stream.close()
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import (
+    FORMAT, CHANNELS, INPUT_RATE, OUTPUT_RATE, CHUNK,
+    _connection_ring, _disconnection_ring,
+)
 
 class AudioManager:
     def __init__(self):

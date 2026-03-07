@@ -24,8 +24,6 @@ import os
 import json
 import base64
 import uuid
-import math
-import struct
 from datetime import datetime, timezone
 from collections import deque
 
@@ -41,6 +39,12 @@ from app.database import execute_update
 
 load_dotenv(os.path.join(project_root, ".env"))
 
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import (
+    FORMAT, CHANNELS, INPUT_RATE, OUTPUT_RATE, CHUNK,
+    _connection_ring, _disconnection_ring,
+)
+
 # Same pattern as test_task_reminder: user + WebSocket URL
 USER_ID = os.getenv("TEST_PENDING_USER_ID", "2ba330c0-a999-46f8-ba2c-855880bdcf5b")
 SENDER_ID = "4dd16650-c57a-44c4-b530-fc1c15d50e45"
@@ -52,50 +56,6 @@ WS_URI = (
     f"ws://localhost:8000/ws/{USER_ID}"
     # f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
 )
-
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-INPUT_RATE = 16000
-OUTPUT_RATE = 24000
-CHUNK = 512
-TONE_RATE = 24000
-
-
-def _generate_tone(freq: float, duration: float, rate: int = TONE_RATE, fade_ms: int = 10) -> bytes:
-    num_samples = int(rate * duration)
-    fade_samples = int(rate * fade_ms / 1000)
-    samples = []
-    for i in range(num_samples):
-        t = i / rate
-        amplitude = 32767 * 0.5
-        sample = amplitude * math.sin(2 * math.pi * freq * t)
-        if i < fade_samples:
-            sample *= i / fade_samples
-        elif i >= num_samples - fade_samples:
-            sample *= (num_samples - i) / fade_samples
-        samples.append(int(sample))
-    return struct.pack(f"<{num_samples}h", *samples)
-
-
-def _connection_ring(p: pyaudio.PyAudio):
-    stream = p.open(format=FORMAT, channels=CHANNELS, rate=TONE_RATE, output=True)
-    try:
-        stream.write(_generate_tone(880, 0.12))
-        stream.write(_generate_tone(1174, 0.18))
-    finally:
-        stream.stop_stream()
-        stream.close()
-
-
-def _disconnection_ring(p: pyaudio.PyAudio):
-    stream = p.open(format=FORMAT, channels=CHANNELS, rate=TONE_RATE, output=True)
-    try:
-        stream.write(_generate_tone(1174, 0.12))
-        stream.write(_generate_tone(587, 0.22))
-    finally:
-        stream.stop_stream()
-        stream.close()
-
 
 def build_pending_message_init():
     """Initial message to send to WebSocket (pending text message, not a task)."""
