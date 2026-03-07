@@ -368,11 +368,11 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                         # Skip duplicate tool calls for the same user input within this session
                                         if normalized_input in processed_tool_inputs:
                                             print(f"⚠️ Duplicate think_and_repeat_output for input '{user_input}', skipping execution.")
-                                            # Return a clear message that the work is complete and no further action is needed
+                                            # Return a silent no-op signal - Gemini must not speak when it receives this
                                             function_responses.append(
                                                 {
                                                     "name": name,
-                                                    "response": {"result": "[COMPLETED] This request was already fully processed and completed. No further action needed. The task has been created and confirmed. Do not call this function again for this input."},
+                                                    "response": {"result": "[SILENT_NO_RESPONSE_NEEDED]"},
                                                     "id": call_id,
                                                     "scheduling": "WHEN_IDLE"
                                                 }
@@ -394,6 +394,20 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                                 # Handle both string (error/duplicate) and dict (success) returns
                                                 if isinstance(result, dict):
                                                     return_string = result.get("result", "")
+                                                    # Add internal tool call logs to scratchpad for observability
+                                                    # Uses source="agent_internal" so they are excluded from future chat history rebuilds
+                                                    internal_history = result.get("chat_history", [])
+                                                    for entry in internal_history:
+                                                        role = entry.get("role")
+                                                        tool_name_entry = entry.get("name")
+                                                        content = entry.get("content", "")
+                                                        if role == "assistant" and tool_name_entry:
+                                                            scratchpad.add_entry(
+                                                                source="agent_internal",
+                                                                format="function_call",
+                                                                name=tool_name_entry,
+                                                                response={"result": content}
+                                                            )
                                                 else:
                                                     return_string = str(result)
                                             except Exception as e:

@@ -123,8 +123,9 @@ SYSTEM_SECTIONS = {
         "- Each unique user request may trigger ONLY ONE function call - EVER.\n"
         "- Once you have called think_and_repeat_output and received a response, you MUST NOT call it again.\n"
         "- The think_and_repeat_output.user_input MUST be the exact user utterance.\n"
-        "- After calling think_and_repeat_output:\n"
-        "  - You MAY provide ONE brief acknowledgment (e.g., 'One moment', 'Let me check').\n"
+        "- When calling think_and_repeat_output:\n"
+        "  - You MAY speak ONE brief acknowledgment (e.g., 'One moment', 'Let me check') AT THE SAME TIME as calling the tool.\n"
+        "  - ONLY say this acknowledgment if you are actually calling think_and_repeat_output. Do NOT say 'one moment' or any similar phrase unless you are simultaneously making the function call.\n"
         "  - This acknowledgment must happen ONLY ONCE per user input.\n"
         "  - The acknowledgment must NOT contain answers, details, assumptions, or guesses.\n"
         "  - After this acknowledgment, you MUST remain silent until the function response arrives.\n"
@@ -136,10 +137,10 @@ SYSTEM_SECTIONS = {
         "  - Do NOT call any function again until the user provides NEW input.\n"
         "  - The function response contains ALL the information you need to speak to the user.\n"
         "  - Once you receive a function response, that is your final answer - do not call the function again.\n"
-        "- If the function response contains markers like [COMPLETED], [ALREADY_PROCESSED], or 'already processed':\n"
+        "- If the function response contains [SILENT_NO_RESPONSE_NEEDED]:\n"
+        "  - Do NOT speak. Do NOT generate any audio whatsoever.\n"
         "  - Do NOT call any function again.\n"
-        "  - Do NOT generate any audio.\n"
-        "  - Stop immediately."
+        "  - The conversation turn is already complete. Stop immediately and wait for the next user input."
     ),
 
     "reminders": (

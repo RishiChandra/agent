@@ -1,3 +1,4 @@
+import time
 from typing import Optional, List, Dict, Any
 
 
@@ -11,6 +12,8 @@ class Scratchpad:
             "user": "",
             "agent": ""
         }
+        self._start_time: float = time.monotonic()
+        self._last_entry_time: float = self._start_time
     
     def add_entry(
         self,
@@ -57,6 +60,9 @@ class Scratchpad:
                 entry["args"] = args
             if response is not None:
                 entry["response"] = response
+            now = time.monotonic()
+            entry["elapsed_s"] = round(now - self._last_entry_time, 2)
+            self._last_entry_time = now
         
         self.entries.append(entry)
     
@@ -101,6 +107,8 @@ class Scratchpad:
             "user": "",
             "agent": ""
         }
+        self._start_time = time.monotonic()
+        self._last_entry_time = self._start_time
     
     def __repr__(self) -> str:
         """String representation of the scratchpad."""
