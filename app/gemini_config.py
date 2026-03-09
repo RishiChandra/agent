@@ -140,10 +140,10 @@ SYSTEM_SECTIONS = {
         "  - Do NOT call any function again until the user provides NEW input.\n"
         "  - The function response contains ALL the information you need to speak to the user.\n"
         "  - Once you receive a function response, that is your final answer - do not call the function again.\n"
-        "- If the function response contains markers like [COMPLETED], [ALREADY_PROCESSED], or 'already processed':\n"
+        "- If the function response contains [SILENT_NO_RESPONSE_NEEDED]:\n"
+        "  - Do NOT speak. Do NOT generate any audio whatsoever.\n"
         "  - Do NOT call any function again.\n"
-        "  - Do NOT generate any audio.\n"
-        "  - Stop immediately."
+        "  - The conversation turn is already complete. Stop immediately and wait for the next user input."
     ),
 
     "reminders": (
