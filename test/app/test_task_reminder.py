@@ -22,7 +22,7 @@ from utils import (
 load_dotenv()
 
 USER_ID = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
-TASK_ID = "1888b064-96aa-4bce-bbbf-87e98f491e2a"
+TASK_ID = "ada542ad-dd67-44ef-a859-90ae03a017f4"
 WS_URI = (
     f"ws://localhost:8000/ws/{USER_ID}"
     #f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
@@ -189,8 +189,8 @@ async def run_websocket_client():
                     "task": {
                         "task_id": TASK_ID,
                         "user_id": USER_ID,
-                        "task_info": {"info": "Finish user testing."},
-                        "time_to_execute": "2026-03-06T10:00:00Z"
+                        "task_info": {"info": "brush my teeth."},
+                        "time_to_execute": "2026-03-08 04:00:00+00"
                     },
                     "message": "Tell the user that it is time for them to complete this task now"
                 },
