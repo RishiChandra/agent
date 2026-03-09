@@ -118,17 +118,17 @@ class GeneralThinkingAgent:
         return False
 
 
-    def think(self, user_input, scratchpad, user_config=None):
+    def think(self, user_input, scratchpad_entries, user_config=None, scratchpad_obj=None):
         print(f"🤔 Thinking about user input: {user_input}")
-        print(f"📋 Scratchpad provided: {scratchpad is not None}, length: {len(scratchpad) if scratchpad else 0}")
+        print(f"📋 Scratchpad provided: {scratchpad_entries is not None}, length: {len(scratchpad_entries) if scratchpad_entries else 0}")
         
         # Check if this exact input was already processed (to prevent infinite loops)
-        duplicate_message = check_if_already_processed(scratchpad, user_input)
+        duplicate_message = check_if_already_processed(scratchpad_entries, user_input)
         if duplicate_message:
             return duplicate_message
         
         # Convert scratchpad entries to chat history format if scratchpad is provided
-        chat_history = build_chat_history_from_scratchpad(scratchpad, user_input)
+        chat_history = build_chat_history_from_scratchpad(scratchpad_entries, user_input)
         
         # Add the current user input
         chat_history.append({"role": "user", "content": user_input})
@@ -206,6 +206,15 @@ class GeneralThinkingAgent:
                 
                 chat_history.append({"role": "assistant", "name": selected_tool.get_tool_name(), "content": tool_response})
                 print(f"Chat history: {chat_history}")
+
+                # Write to scratchpad immediately so partial results are visible even if think() times out
+                if scratchpad_obj is not None:
+                    scratchpad_obj.add_entry(
+                        source="agent_internal",
+                        format="function_call",
+                        name=selected_tool.get_tool_name(),
+                        response={"result": tool_response}
+                    )
             
             # Break if we're generating response
             if selected_tool_name == "generate_response_tool":
