@@ -1,4 +1,5 @@
 import asyncio
+import os
 import websockets
 import json
 import base64
@@ -7,12 +8,11 @@ from collections import deque
 import signal
 import sys
 
-# ===== Audio Config =====
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-INPUT_RATE = 16000   # matches Gemini SEND_SAMPLE_RATE
-OUTPUT_RATE = 24000  # matches Gemini RECEIVE_SAMPLE_RATE
-CHUNK = 512
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import (
+    FORMAT, CHANNELS, INPUT_RATE, OUTPUT_RATE, CHUNK,
+    _connection_ring, _disconnection_ring,
+)
 
 class AudioManager:
     def __init__(self):
@@ -95,8 +95,11 @@ async def test_ws():
     try:
         await audio_mgr.init()
         
+        disconnection_played = False
+
         async with websockets.connect(uri) as ws:
             print("✅ Connected to FastAPI WebSocket")
+            await asyncio.to_thread(_connection_ring, audio_mgr.p)
 
             async def send_audio():
                 """Continuously capture mic and send to server"""
@@ -113,6 +116,7 @@ async def test_ws():
                         break
 
             async def recv_audio():
+                nonlocal disconnection_played
                 """Receive Gemini audio and play through speakers"""
                 while audio_mgr.is_running:
                     try:
@@ -137,6 +141,8 @@ async def test_ws():
                             
                     except websockets.exceptions.ConnectionClosed:
                         print("❌ WebSocket connection closed")
+                        disconnection_played = True
+                        await asyncio.to_thread(_disconnection_ring, audio_mgr.p)
                         break
                     except Exception as e:
                         print(f"Error in recv_audio: {e}")
@@ -144,7 +150,11 @@ async def test_ws():
 
             # Run both tasks concurrently
             await asyncio.gather(send_audio(), recv_audio())
-            
+
+        if not disconnection_played:
+            await asyncio.to_thread(_disconnection_ring, audio_mgr.p)
+        print("🔔 Disconnected from WebSocket")
+
     except (ConnectionRefusedError, OSError) as e:
         print(f"❌ Connection refused. Make sure the FastAPI server is running. Error: {e}")
     except Exception as e:
