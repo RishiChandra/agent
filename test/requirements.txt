@@ -7,6 +7,7 @@ python-dotenv
 google-genai
 httpx
 requests
+tzdata
 openai
 pytest
 psycopg2
