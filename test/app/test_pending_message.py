@@ -53,8 +53,9 @@ USE_IOT_HUB_INIT = os.getenv("USE_IOT_HUB_INIT", "1").lower() in ("1", "true", "
 # Chat to attach the test message to (must exist or use a test-only chat_id)
 TEST_CHAT_ID = os.getenv("TEST_PENDING_CHAT_ID", "550e8400-e29b-41d4-a716-446655440000")
 WS_URI = (
-    f"ws://localhost:8000/ws/{USER_ID}"
-    # f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
+    # Azure App Service Web App (dual-stack: IPv4 + IPv6). Container App URL is retired.
+    f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{USER_ID}"
+    # f"ws://localhost:8000/ws/{USER_ID}"  # local dev
 )
 
 def build_pending_message_init():

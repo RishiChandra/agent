@@ -88,8 +88,9 @@ class AudioManager:
 async def test_ws():
     user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
 
-    uri = f"ws://localhost:8000/ws/{user_id}"
-    #uri = f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{user_id}"
+    # Azure App Service Web App (dual-stack: IPv4 + IPv6). Container App URL is retired.
+    uri = f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{user_id}"
+    # uri = f"ws://localhost:8000/ws/{user_id}"  # local dev
     audio_mgr = AudioManager()
     
     try:
