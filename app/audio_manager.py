@@ -51,7 +51,13 @@ class AudioManager:
         self._wake_event.set()
 
     async def _play_audio(self):
-        """Paced output: emit one chunk every chunk_duration; bridge gaps with silence."""
+        """Paced output: emit one chunk every chunk_duration; bridge gaps with silence.
+
+        Uses plain asyncio.sleep so the loop runs at strict realtime cadence.
+        Gemini emits chunks faster than realtime; without strict pacing, chunks
+        burst out at server speed, then network rate-limits delivery to the
+        client — producing ESP32 audio queue underruns and audible gaps.
+        """
         loop = asyncio.get_event_loop()
         next_emit = loop.time()
         silence_run = 0
@@ -66,7 +72,6 @@ class AudioManager:
                         print(f"🌫️→🎵 silence run ended after {silence_run} chunks (~{silence_run*SILENCE_CHUNK_MS}ms)")
                         silence_run = 0
                 else:
-                    # Queue empty but turn still active → emit silence to keep stream alive.
                     audio_data = SILENCE_CHUNK
                     is_silence = True
                     silence_run += 1
@@ -80,29 +85,21 @@ class AudioManager:
                 emit_idx += 1
                 chunk_ms = (len(audio_data) / 2) / SAMPLE_RATE * 1000
                 drift_ms = (loop.time() - next_emit) * 1000
-                # Log every real chunk; throttle silence logs to every ~10th
                 if not is_silence or silence_run == 1 or silence_run % 10 == 0:
                     tag = "SIL" if is_silence else "AUD"
                     print(f"📤 emit#{emit_idx} {tag} {len(audio_data)}B (~{int(chunk_ms)}ms) "
                           f"send={send_ms:.0f}ms drift={drift_ms:+.0f}ms qdepth={len(self.audio_playback_queue)} "
                           f"silence_run={silence_run}")
 
-                # Pace at chunk's real-time duration (int16 mono → bytes/2 = samples).
                 chunk_duration = (len(audio_data) / 2) / SAMPLE_RATE
                 next_emit += chunk_duration
                 sleep_for = next_emit - loop.time()
                 if sleep_for > 0:
-                    # Sleep, but wake early if new audio arrives or turn ends.
-                    try:
-                        await asyncio.wait_for(self._wake_event.wait(), timeout=sleep_for)
-                    except asyncio.TimeoutError:
-                        pass
-                    self._wake_event.clear()
+                    await asyncio.sleep(sleep_for)
                 else:
-                    # Behind schedule (slow network) — resync, no sleep.
-                    if drift_ms > 100:
+                    if drift_ms > 200:
                         print(f"⚠️ pacing behind by {drift_ms:.0f}ms — resyncing")
-                    next_emit = loop.time()
+                        next_emit = loop.time()
             print(f"🎬 _play_audio END (emits={emit_idx} final_silence_run={silence_run})")
         except asyncio.CancelledError:
             print(f"🎬 _play_audio CANCELLED (emits={emit_idx})")
