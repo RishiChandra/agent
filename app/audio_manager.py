@@ -10,6 +10,13 @@ SILENCE_CHUNK_MS = 40
 SILENCE_CHUNK_SAMPLES = int(SAMPLE_RATE * SILENCE_CHUNK_MS / 1000)
 SILENCE_CHUNK = b"\x00\x00" * SILENCE_CHUNK_SAMPLES  # int16 little-endian zeros
 
+# Coalesce small Gemini chunks into ~200ms blocks before sending.
+# Each WebSocket frame has TLS + JSON + base64 + WS overhead — at 25 frames/sec
+# (Gemini's 40ms chunks) cellular PPP modem chokes on per-message processing.
+# Bundling 5x chunks → 5 frames/sec, same data rate, 5x less overhead.
+COALESCE_TARGET_MS = 200
+COALESCE_TARGET_BYTES = int(SAMPLE_RATE * COALESCE_TARGET_MS / 1000) * 2
+
 
 class AudioManager:
     """Manages audio queues and state for the websocket connection.
@@ -66,7 +73,15 @@ class AudioManager:
         try:
             while self._turn_active or self.audio_playback_queue:
                 if self.audio_playback_queue:
-                    audio_data = self.audio_playback_queue.popleft()
+                    # Coalesce: drain queue into one bundle up to COALESCE_TARGET_BYTES
+                    # so each WS frame carries ~200ms of audio instead of 40ms.
+                    parts = [self.audio_playback_queue.popleft()]
+                    bundled = len(parts[0])
+                    while bundled < COALESCE_TARGET_BYTES and self.audio_playback_queue:
+                        nxt = self.audio_playback_queue.popleft()
+                        parts.append(nxt)
+                        bundled += len(nxt)
+                    audio_data = b"".join(parts) if len(parts) > 1 else parts[0]
                     is_silence = False
                     if silence_run > 0:
                         print(f"🌫️→🎵 silence run ended after {silence_run} chunks (~{silence_run*SILENCE_CHUNK_MS}ms)")
