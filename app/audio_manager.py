@@ -38,12 +38,15 @@ class AudioManager:
         self.audio_playback_queue.append(audio_data)
         self._turn_active = True
         self._wake_event.set()
+        chunk_ms = int((len(audio_data) / 2) * 1000 / SAMPLE_RATE)
+        print(f"🎙️ Gemini chunk in: {len(audio_data)}B (~{chunk_ms}ms) qdepth={len(self.audio_playback_queue)}")
 
         if self.playback_task is None or self.playback_task.done():
             self.playback_task = asyncio.create_task(self._play_audio())
 
     def mark_turn_complete(self):
         """Signal end of Gemini speech turn. Pacing loop drains queue then exits."""
+        print(f"🏁 mark_turn_complete called (qdepth={len(self.audio_playback_queue)})")
         self._turn_active = False
         self._wake_event.set()
 
@@ -51,17 +54,38 @@ class AudioManager:
         """Paced output: emit one chunk every chunk_duration; bridge gaps with silence."""
         loop = asyncio.get_event_loop()
         next_emit = loop.time()
+        silence_run = 0
+        emit_idx = 0
+        print(f"🎬 _play_audio START (turn_active={self._turn_active} qdepth={len(self.audio_playback_queue)})")
         try:
             while self._turn_active or self.audio_playback_queue:
                 if self.audio_playback_queue:
                     audio_data = self.audio_playback_queue.popleft()
+                    is_silence = False
+                    if silence_run > 0:
+                        print(f"🌫️→🎵 silence run ended after {silence_run} chunks (~{silence_run*SILENCE_CHUNK_MS}ms)")
+                        silence_run = 0
                 else:
                     # Queue empty but turn still active → emit silence to keep stream alive.
                     audio_data = SILENCE_CHUNK
+                    is_silence = True
+                    silence_run += 1
 
+                t_send_start = loop.time()
                 await self.websocket.send_text(json.dumps({
                     "audio": base64.b64encode(audio_data).decode("utf-8")
                 }))
+                send_ms = (loop.time() - t_send_start) * 1000
+
+                emit_idx += 1
+                chunk_ms = (len(audio_data) / 2) / SAMPLE_RATE * 1000
+                drift_ms = (loop.time() - next_emit) * 1000
+                # Log every real chunk; throttle silence logs to every ~10th
+                if not is_silence or silence_run == 1 or silence_run % 10 == 0:
+                    tag = "SIL" if is_silence else "AUD"
+                    print(f"📤 emit#{emit_idx} {tag} {len(audio_data)}B (~{int(chunk_ms)}ms) "
+                          f"send={send_ms:.0f}ms drift={drift_ms:+.0f}ms qdepth={len(self.audio_playback_queue)} "
+                          f"silence_run={silence_run}")
 
                 # Pace at chunk's real-time duration (int16 mono → bytes/2 = samples).
                 chunk_duration = (len(audio_data) / 2) / SAMPLE_RATE
@@ -76,11 +100,15 @@ class AudioManager:
                     self._wake_event.clear()
                 else:
                     # Behind schedule (slow network) — resync, no sleep.
+                    if drift_ms > 100:
+                        print(f"⚠️ pacing behind by {drift_ms:.0f}ms — resyncing")
                     next_emit = loop.time()
+            print(f"🎬 _play_audio END (emits={emit_idx} final_silence_run={silence_run})")
         except asyncio.CancelledError:
+            print(f"🎬 _play_audio CANCELLED (emits={emit_idx})")
             raise
         except Exception as e:
-            print(f"Error playing audio: {e}")
+            print(f"❌ Error playing audio: {e}")
 
     async def interrupt(self):
         """Handle interruption by stopping playback and clearing queue."""
