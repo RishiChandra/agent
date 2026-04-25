@@ -24,8 +24,9 @@ load_dotenv()
 USER_ID = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
 TASK_ID = "ada542ad-dd67-44ef-a859-90ae03a017f4"
 WS_URI = (
-    f"ws://localhost:8000/ws/{USER_ID}"
-    #f"wss://websocket-ai-pin.bluesmoke-32dd7ab8.westus2.azurecontainerapps.io/ws/{USER_ID}"
+    # Azure App Service Web App (dual-stack: IPv4 + IPv6). Container App URL is retired.
+    f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{USER_ID}"
+    # f"ws://localhost:8000/ws/{USER_ID}"  # local dev
 )
 
 
