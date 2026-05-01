@@ -8,6 +8,9 @@ httpx
 requests
 tzdata
 
+# Opus audio compression (Gemini PCM → Opus for cellular bandwidth)
+opuslib
+
 # Database
 psycopg2-binary
 
