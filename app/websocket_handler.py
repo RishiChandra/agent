@@ -265,9 +265,19 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             await send_client_content(content=gemini_content, mark_turn_complete=turn_complete)
                             continue
 
-                        # Primary path: audio
+                        # Primary path: audio. Device may send raw PCM (legacy) or
+                        # TLV-packed Opus (codec=opus). Decode to PCM before queue
+                        # so downstream Gemini-feed path stays codec-agnostic.
                         if "audio" in data:
-                            audio_bytes = base64.b64decode(data["audio"])
+                            payload = base64.b64decode(data["audio"])
+                            if data.get("codec") == "opus":
+                                sr = int(data.get("sr", 16000))
+                                frame_ms = int(data.get("frame_ms", 20))
+                                frame_samples = sr * frame_ms // 1000
+                                audio_bytes = audio_manager.decode_uplink_opus(
+                                    payload, sample_rate=sr, frame_samples=frame_samples)
+                            else:
+                                audio_bytes = payload
                             await audio_manager.audio_queue.put(audio_bytes)
                     except WebSocketDisconnect:
                         # Re-raise to be caught by outer handler

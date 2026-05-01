@@ -47,6 +47,25 @@ COALESCE_WAIT_S = COALESCE_TARGET_MS / 1000
 # bundle cadence steady (see add_audio docstring).
 SILENCE_DROP_RMS = 30
 
+# Uplink (device → server) Opus config. Device encodes 16kHz mono int16, 20ms frames.
+UPLINK_SAMPLE_RATE = 16000
+UPLINK_FRAME_MS = 20
+UPLINK_FRAME_SAMPLES = UPLINK_SAMPLE_RATE * UPLINK_FRAME_MS // 1000  # 320
+
+
+def _unpack_opus_tlv(tlv: bytes) -> list[bytes]:
+    """Inverse of _pack_opus_tlv. Walks [u16 BE len][opus_bytes]... per frame."""
+    out = []
+    i = 0
+    while i + 2 <= len(tlv):
+        n = struct.unpack(">H", tlv[i:i+2])[0]
+        i += 2
+        if i + n > len(tlv):
+            break
+        out.append(tlv[i:i+n])
+        i += n
+    return out
+
 
 def _pack_opus_tlv(opus_packets: list[bytes]) -> bytes:
     """Pack a list of Opus packets as TLV: [u16 BE len][opus_bytes]... per frame.
@@ -104,6 +123,25 @@ class AudioManager:
         # Carry-over PCM buffer: Gemini chunks aren't always exact 40ms multiples,
         # so accumulate samples and emit Opus packets only when we have a full frame.
         self._pcm_residual = b""
+        # Per-connection uplink Opus decoder (device mic → Gemini). Lazy-init on
+        # first opus message so PCM-only clients allocate nothing.
+        self._opus_decoder = None
+
+    def decode_uplink_opus(self, tlv: bytes,
+                            sample_rate: int = UPLINK_SAMPLE_RATE,
+                            frame_samples: int = UPLINK_FRAME_SAMPLES) -> bytes:
+        """Decode TLV-packed Opus packets from device into raw int16 PCM."""
+        if not OPUS_AVAILABLE:
+            raise RuntimeError("opuslib unavailable, cannot decode uplink opus")
+        if self._opus_decoder is None:
+            self._opus_decoder = opuslib.Decoder(sample_rate, CHANNELS)
+        pcm = bytearray()
+        for pkt in _unpack_opus_tlv(tlv):
+            try:
+                pcm += self._opus_decoder.decode(pkt, frame_samples, decode_fec=False)
+            except Exception as e:
+                print(f"⚠️ opus_decode failed (pkt={len(pkt)}B): {e}")
+        return bytes(pcm)
 
     def _encode_pcm_to_opus_packets(self, pcm: bytes) -> list[bytes]:
         """Slice PCM into OPUS_FRAME_BYTES_PCM chunks, encode each. Carry over partial.
