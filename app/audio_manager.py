@@ -15,18 +15,20 @@ def _rms_int16_le(pcm: bytes) -> int:
 # Match gemini_config.RECEIVE_SAMPLE_RATE — Gemini Live emits 24kHz mono int16 PCM.
 SAMPLE_RATE = 24000
 
-# Coalesce small Gemini chunks into ~1500ms blocks before sending.
+# Coalesce small Gemini chunks into ~2500ms blocks before sending.
 # Each WebSocket frame has TLS + JSON + base64 + WS overhead — at 25 frames/sec
 # (Gemini's 40ms chunks) cellular PPP modem chokes on per-message processing.
-# Bundling ~37x chunks → <1 frame/sec, same data rate, drastically less overhead.
-# Big bundles + ESP32 jitter buffer (1200ms) = ~2.7s underrun tolerance once
-# pipeline primed. Survives cellular tower handoff / TCP retransmit stalls.
-COALESCE_TARGET_MS = 1500
+# Bundling ~62x chunks → <0.5 frame/sec, same data rate, dramatically less overhead.
+# Bundle ~160KB JSON. Observed cellular delivers 97KB in ~1.3s → 160KB ~2.2s,
+# stays under 2500ms emit interval (delivery margin ~300ms).
+# ESP32 jitter buffer (3000ms) absorbs observed 1500ms cellular jitter spikes
+# with 1500ms safety margin. First-audio ~5.5s, steady-state immune to jitter.
+COALESCE_TARGET_MS = 2500
 COALESCE_TARGET_BYTES = int(SAMPLE_RATE * COALESCE_TARGET_MS / 1000) * 2
 # Max wait per bundle to fill to target. Gemini streams at ~realtime (1 chunk/40ms),
 # so without waiting, queue empty after popleft → bundle = 1 chunk. Waiting up to
-# COALESCE_TARGET_MS guarantees bundle fills to target. Trade first-audio latency
-# (~1.5s + ESP32 buffer 1.2s = ~2.7s) for steady pipeline immune to cellular jitter.
+# COALESCE_TARGET_MS guarantees bundle fills to target. Silent chunks no longer
+# dropped, so bundle always fills in COALESCE_TARGET_MS wall clock.
 COALESCE_WAIT_S = COALESCE_TARGET_MS / 1000
 
 # Drop silent Gemini chunks (natural prosody pauses emit PCM zeros).
@@ -69,9 +71,12 @@ class AudioManager:
     def add_audio(self, audio_data):
         """Add audio data to the playback queue.
 
-        Silent chunks (RMS < SILENCE_DROP_RMS) are dropped — Gemini emits PCM zeros
-        during prosody pauses, and pacing through them adds wall-clock silence the
-        user perceives as a long gap. Dropping compresses to back-to-back voiced audio.
+        Pass through ALL Gemini chunks (voiced + silent). Silent-drop was attempted
+        for desktop client to compress prosody pauses, but on cellular it breaks
+        bundle filling: dropping silence leaves queue empty mid-bundle → coalesce
+        wait timeout → partial bundle emit → ESP32 buffer underrun → audible gap.
+        Keeping silence ensures bundles always fill to target in steady cadence.
+        Brief Gemini between-phrase pauses are natural speech prosody, not gaps.
         """
         self._turn_active = True
         rms = _rms_int16_le(audio_data)
@@ -82,14 +87,11 @@ class AudioManager:
         gseq = self._gemini_seq
         dt_gemini = (t_recv_ms - self._last_gemini_recv_ms) if self._last_gemini_recv_ms is not None else 0
         self._last_gemini_recv_ms = t_recv_ms
-        if rms < SILENCE_DROP_RMS:
-            self._dropped_silent_chunks = getattr(self, "_dropped_silent_chunks", 0) + 1
-            if self._dropped_silent_chunks % 25 == 1:
-                print(f"🤫 Dropped silent Gemini chunk: gseq={gseq} t_recv={t_recv_ms}ms dt_gemini={dt_gemini}ms rms={rms} (~{chunk_ms}ms) total_dropped={self._dropped_silent_chunks}")
-            return
+        is_silent = rms < SILENCE_DROP_RMS
         self.audio_playback_queue.append((audio_data, gseq, t_recv_ms))
         self._wake_event.set()
-        print(f"🎙️ Gemini chunk in: gseq={gseq} t_recv={t_recv_ms}ms dt_gemini={dt_gemini}ms {len(audio_data)}B (~{chunk_ms}ms) rms={rms} qdepth={len(self.audio_playback_queue)}")
+        sil_tag = " SILENT" if is_silent else ""
+        print(f"🎙️ Gemini chunk in: gseq={gseq} t_recv={t_recv_ms}ms dt_gemini={dt_gemini}ms {len(audio_data)}B (~{chunk_ms}ms) rms={rms}{sil_tag} qdepth={len(self.audio_playback_queue)}")
 
         if self.playback_task is None or self.playback_task.done():
             self.playback_task = asyncio.create_task(self._play_audio())
