@@ -514,7 +514,10 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         turn_complete = False
                         if server_content and hasattr(server_content, "turn_complete"):
                             turn_complete = server_content.turn_complete
-                        
+                            if turn_complete:
+                                # Stop bridging silence — pacing loop drains queue and exits.
+                                audio_manager.mark_turn_complete()
+
                         # If we're ending the conversation, wait for turn completion and audio playback
                         if should_close_after_audio:
                             # Check if turn is complete (either via turn_complete flag or by waiting for no new audio)
