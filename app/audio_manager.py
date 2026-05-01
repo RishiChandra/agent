@@ -35,11 +35,12 @@ OPUS_FRAME_BYTES_PCM = OPUS_FRAME_SAMPLES * 2  # int16 mono = 1920 bytes per fra
 # = 64 KB/s required. Opus 24kbps = 3 KB/s payload → 4 KB/s post-base64. 16x headroom.
 OPUS_BITRATE = 24000
 
-# Coalesce small Gemini chunks into ~5000ms blocks before sending.
-# Each WebSocket frame has TLS + JSON + base64 + WS overhead — Opus shrinks per-bundle
-# payload from ~240KB raw PCM to ~15KB Opus, fits cellular MTU/throughput easily.
-# Bigger bundle = fewer WS frames per unit audio time = lower per-message overhead.
-COALESCE_TARGET_MS = 5000
+# Coalesce small Gemini chunks before sending to device. Big bundles = fewer
+# WS frames + lower per-message overhead, but every ms of bundle wait shows up
+# as added first-byte latency on the device. 1000ms is a balance: ~25 Opus
+# packets bundled at 24kbps ≈ 3KB payload — well inside cellular MTU — while
+# letting the first AI word reach the speaker ~1s after Gemini emits.
+COALESCE_TARGET_MS = 1000
 COALESCE_WAIT_S = COALESCE_TARGET_MS / 1000
 
 # Drop silent Gemini chunks (natural prosody pauses emit PCM zeros).
