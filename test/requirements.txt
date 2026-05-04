@@ -1,10 +1,11 @@
 websockets
 pyaudio
+opuslib
 fastapi
 uvicorn[standard]
 gunicorn
 python-dotenv
-google-genai
+google-genai>=1.70.0
 httpx
 requests
 tzdata

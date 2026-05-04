@@ -48,8 +48,8 @@ class UserSessionManager:
         if not self.user_info:
             return "the user"
         
-        first_name = self.user_info.get("first_name", "")
-        last_name = self.user_info.get("last_name", "")
+        first_name = (self.user_info.get("first_name") or "").strip()
+        last_name = (self.user_info.get("last_name") or "").strip()
         user_name = f"{first_name} {last_name}".strip()
         
         return user_name if user_name else "the user"

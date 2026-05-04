@@ -11,7 +11,9 @@ load_dotenv()
 
 # Gemini Configuration
 # Use GEMINI_API_KEY in .env (or GOOGLE_API_KEY as fallback for compatibility with gemini_config)
-model = "gemini-3-flash-preview"
+# Text + function calling uses generateContent — do not use *-live-* model IDs here; those are
+# Live API only (see gemini_config.MODEL and client.live / bidi sessions).
+model = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3-flash-preview")
 api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 
@@ -57,7 +59,7 @@ def _openai_tools_to_gemini(tools):
 
 def call_gemini(messages, tools=None):
     """
-    Call Gemini 3 Flash with the given messages and optional tools.
+    Call Gemini (text generateContent) with the given messages and optional tools.
 
     Args:
         messages: List of dicts with "role" ("system"|"user"|"assistant") and "content".

@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from utils import (
     FORMAT, CHANNELS, INPUT_RATE, OUTPUT_RATE, CHUNK,
     _connection_ring, _disconnection_ring,
+    decode_websocket_audio_for_playback,
 )
 
 # Same pattern as test_task_reminder: user + WebSocket URL
@@ -54,8 +55,8 @@ USE_IOT_HUB_INIT = os.getenv("USE_IOT_HUB_INIT", "1").lower() in ("1", "true", "
 TEST_CHAT_ID = os.getenv("TEST_PENDING_CHAT_ID", "550e8400-e29b-41d4-a716-446655440000")
 WS_URI = (
     # Azure App Service Web App (dual-stack: IPv4 + IPv6). Container App URL is retired.
-    f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{USER_ID}"
-    # f"ws://localhost:8000/ws/{USER_ID}"  # local dev
+    # f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{USER_ID}"
+    f"ws://localhost:8000/ws/{USER_ID}"  # local dev
 )
 
 def build_pending_message_init():
@@ -218,8 +219,9 @@ async def recv_audio(ws, audio_mgr: AudioManager, on_disconnected=None):
                 print("🛑 Interrupt received")
                 audio_mgr.interrupt()
             elif "audio" in data:
-                audio_bytes = base64.b64decode(data["audio"])
-                audio_mgr.queue_audio(audio_bytes)
+                pcm = decode_websocket_audio_for_playback(data)
+                if pcm:
+                    audio_mgr.queue_audio(pcm)
             elif "output_text" in data:
                 print(f"🗣️ Server: {data['output_text']}")
             elif "input_text" in data:

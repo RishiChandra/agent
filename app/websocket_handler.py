@@ -3,6 +3,7 @@ import base64
 import asyncio
 import traceback
 import time
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -191,8 +192,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                 )
                                 message = instruction + raw_messages
                                 add_to_scratchpad(source="user", format="text", content=message)
-                                gemini_content = {"role": "user", "parts": [{"text": message}]}
-                                await send_client_content(content=gemini_content, mark_turn_complete=True)
+                                await gemini_session.send_realtime_input(text=message)
                                 print(f"📤 Sent {len(pending_list)} pending message(s) to Gemini (instructed to tell user)")
                                 await asyncio.to_thread(mark_messages_as_read, pending_list)
                                 await asyncio.to_thread(clear_pending_text_message_job_for_user, user_id)
@@ -231,8 +231,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                     f"Task: {title}\nDescription: {desc}\nWhen: {when}"
                                 )
                                 add_to_scratchpad(source="user", format="text", content=instruction)
-                                gemini_content = {"role": "user", "parts": [{"text": instruction}]}
-                                await send_client_content(content=gemini_content, mark_turn_complete=True)
+                                await gemini_session.send_realtime_input(text=instruction)
                                 print("📤 Sent pending task to Gemini (instructed to tell user)")
                             continue
 
@@ -261,8 +260,16 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                 message += json.dumps(task)
                                                             
                             scratchpad.add_entry(source="user", format="text", content=message)
-                            gemini_content = {"role": "user", "parts": [{"text": message}]}
-                            await send_client_content(content=gemini_content, mark_turn_complete=turn_complete)
+                            # Native-audio Live models respond reliably to realtime text; client_content-only
+                            # turns can stall with AUDIO response modality (no tool/audio until timeout).
+                            if turn_complete:
+                                await gemini_session.send_realtime_input(text=message)
+                                print(f"📤 Sent text to Gemini (realtime): {message[:200]!r}{'...' if len(message) > 200 else ''}")
+                            else:
+                                await send_client_content(
+                                    content={"role": "user", "parts": [{"text": message}]},
+                                    mark_turn_complete=False,
+                                )
                             continue
 
                         # Primary path: audio. Device may send raw PCM (legacy) or
@@ -322,7 +329,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         # Add timeout for realtime input sending to prevent hang during connection closure
                         await asyncio.wait_for(
                             gemini_session.send_realtime_input(
-                                media={
+                                audio={
                                     "data": data,
                                     "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}",
                                 }
@@ -340,172 +347,197 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 # Flag to track if we should close after receiving the goodbye audio
                 should_close_after_audio = False
                 last_audio_received_time = None
+                last_logged_resumption_handle = None
                 while True:
                     async for response in gemini_session.receive():
-                        # retrieve continuously resumable session ID (identical to working example)
+                        # Gemini may emit many session resumption updates; log only handle changes.
                         if response.session_resumption_update:
                             update = response.session_resumption_update
-                            if update.resumable and update.new_handle:
-                                # The handle should be retained and linked to the session.
-                                print(f"new SESSION: {update.new_handle}")
+                            if (
+                                update.resumable
+                                and update.new_handle
+                                and update.new_handle != last_logged_resumption_handle
+                            ):
+                                last_logged_resumption_handle = update.new_handle
+                                print(f"Session resumption handle: {update.new_handle}")
 
                         # Check if the connection will be soon terminated
                         if response.go_away is not None:
                             print(response.go_away.time_left)
 
+                        # Some Live responses carry plain text on the message (TEXT modality or previews).
+                        top_text = getattr(response, "text", None)
+                        if isinstance(top_text, str) and top_text.strip():
+                            await transcription_handler.handle_output_transcription(
+                                SimpleNamespace(text=top_text)
+                            )
+
                         # Handle tool calls (identical to working example)
                         if response.tool_call:
-                            # Commit any pending audio buffers before handling function calls
-                            scratchpad.commit_audio_buffer("user")
-                            scratchpad.commit_audio_buffer("agent")
-                            
-                            print(f"📝 Tool call received: {response.tool_call}")
+                            function_calls_list = list(response.tool_call.function_calls or ())
+                            has_think_turn = any(
+                                getattr(fc, "name", None) == "think_and_repeat_output"
+                                for fc in function_calls_list
+                            )
+                            if has_think_turn:
+                                scratchpad.begin_interstitial_ack_window()
+                            try:
+                                # Commit any pending audio buffers before handling function calls
+                                scratchpad.commit_audio_buffer("user")
+                                scratchpad.commit_audio_buffer("agent")
+                                if has_think_turn:
+                                    scratchpad.tag_pre_tool_agent_ack_after_last_user()
 
-                            function_responses = []
+                                print(f"📝 Tool call received: {response.tool_call}")
 
-                            for function_call in response.tool_call.function_calls:
-                                name = function_call.name
-                                args = function_call.args
-                                call_id = function_call.id
+                                function_responses = []
 
-                                # Check if this is a status notification (not a real tool call)
-                                # Status notifications have 'status' or 'id' in args but no actual function parameters
-                                if "status" in args or ("id" in args and "user_input" not in args):
-                                    print(f"📋 Status notification received: {args}")
-                                    # Status notifications are informational, not tool calls to execute
-                                    # We don't need to send a response for these
-                                    continue
+                                for function_call in function_calls_list:
+                                    name = function_call.name
+                                    args = function_call.args
+                                    call_id = function_call.id
 
-                                # Handle think function
-                                if name == "think_and_repeat_output":
-                                    # Only process if we have actual user input (not a status notification)
-                                    if "user_input" in args:
-                                        # Get user_id (optional)
-                                        user_input = args.get("user_input")
-                                        normalized_input = _normalize_text(user_input)
+                                    # Check if this is a status notification (not a real tool call)
+                                    # Status notifications have 'status' or 'id' in args but no actual function parameters
+                                    if "status" in args or ("id" in args and "user_input" not in args):
+                                        print(f"📋 Status notification received: {args}")
+                                        # Status notifications are informational, not tool calls to execute
+                                        # We don't need to send a response for these
+                                        continue
 
-                                        # Skip duplicate tool calls for the same user input within this session
-                                        if normalized_input in processed_tool_inputs:
-                                            print(f"⚠️ Duplicate think_and_repeat_output for input '{user_input}', skipping execution.")
-                                            # Return a silent no-op signal - Gemini must not speak when it receives this
-                                            function_responses.append(
-                                                {
-                                                    "name": name,
-                                                    "response": {"result": "[SILENT_NO_RESPONSE_NEEDED]"},
-                                                    "id": call_id,
-                                                    "scheduling": "WHEN_IDLE"
-                                                }
-                                            )
-                                            # Continue to next iteration to avoid processing this duplicate
-                                            continue
-                                        else:
-                                            processed_tool_inputs.add(normalized_input)
-                                            # Call think_and_repeat_output function in a separate thread to avoid blocking the event loop
-                                            # This allows the agent to continue processing audio (like "One moment") while thinking
-                                            try:
-                                                result = await asyncio.to_thread(
-                                                    generalThinkingAgent.think,
-                                                    user_input,
-                                                    scratchpad.get_entries(),
-                                                    user_config
+                                    # Handle think function
+                                    if name == "think_and_repeat_output":
+                                        # Only process if we have actual user input (not a status notification)
+                                        if "user_input" in args:
+                                            # Get user_id (optional)
+                                            user_input = args.get("user_input")
+                                            normalized_input = _normalize_text(user_input)
+
+                                            # Skip duplicate tool calls for the same user input within this session
+                                            if normalized_input in processed_tool_inputs:
+                                                print(f"⚠️ Duplicate think_and_repeat_output for input '{user_input}', skipping execution.")
+                                                # Return a silent no-op signal - Gemini must not speak when it receives this
+                                                function_responses.append(
+                                                    {
+                                                        "name": name,
+                                                        "response": {"result": "[SILENT_NO_RESPONSE_NEEDED]"},
+                                                        "id": call_id,
+                                                        "scheduling": "WHEN_IDLE"
+                                                    }
                                                 )
-                                                print(f"✅ think() finished: {str(result)[:80]}...")
-                                                # Handle both string (error/duplicate) and dict (success) returns
-                                                if isinstance(result, dict):
-                                                    return_string = result.get("result", "")
-                                                    # Add internal tool call logs to scratchpad for observability
-                                                    # Uses source="agent_internal" so they are excluded from future chat history rebuilds
-                                                    internal_history = result.get("chat_history", [])
-                                                    for entry in internal_history:
-                                                        role = entry.get("role")
-                                                        tool_name_entry = entry.get("name")
-                                                        content = entry.get("content", "")
-                                                        if role == "assistant" and tool_name_entry:
-                                                            scratchpad.add_entry(
-                                                                source="agent_internal",
-                                                                format="function_call",
-                                                                name=tool_name_entry,
-                                                                response={"result": content}
-                                                            )
-                                                else:
-                                                    return_string = str(result)
-                                            except Exception as e:
-                                                print(f"⚠️ think() failed: {e}")
-                                                traceback.print_exc()
-                                                return_string = "Sorry, something went wrong while processing that. Please try again."
-                                            # Ensure we end with a period if not present, for better TTS
-                                            if return_string and not return_string.endswith('.'):
-                                                return_string += "."
-                                            function_responses.append(
-                                                {
-                                                    "name": name,
-                                                    "response": {"result": return_string},
-                                                    "id": call_id,
-                                                    "scheduling": "WHEN_IDLE"
-                                                }
-                                            )
-                                    else:
-                                        print(f"Think_and_repeat_output called but 'user_input' not in args: {args}")
+                                                # Continue to next iteration to avoid processing this duplicate
+                                                continue
+                                            else:
+                                                processed_tool_inputs.add(normalized_input)
+                                                # Call think_and_repeat_output function in a separate thread to avoid blocking the event loop
+                                                # This allows the agent to continue processing audio (like "One moment") while thinking
+                                                try:
+                                                    result = await asyncio.to_thread(
+                                                        generalThinkingAgent.think,
+                                                        user_input,
+                                                        scratchpad.get_entries(),
+                                                        user_config
+                                                    )
+                                                    print(f"✅ think() finished: {str(result)[:80]}...")
+                                                    # Handle both string (error/duplicate) and dict (success) returns
+                                                    if isinstance(result, dict):
+                                                        return_string = result.get("result", "")
+                                                        # Add internal tool call logs to scratchpad for observability
+                                                        # Uses source="agent_internal" so they are excluded from future chat history rebuilds
+                                                        internal_history = result.get("chat_history", [])
+                                                        for entry in internal_history:
+                                                            role = entry.get("role")
+                                                            tool_name_entry = entry.get("name")
+                                                            content = entry.get("content", "")
+                                                            if role == "assistant" and tool_name_entry:
+                                                                scratchpad.add_entry(
+                                                                    source="agent_internal",
+                                                                    format="function_call",
+                                                                    name=tool_name_entry,
+                                                                    response={"result": content}
+                                                                )
+                                                    else:
+                                                        return_string = str(result)
+                                                except Exception as e:
+                                                    print(f"⚠️ think() failed: {e}")
+                                                    traceback.print_exc()
+                                                    return_string = "Sorry, something went wrong while processing that. Please try again."
+                                                # Ensure we end with a period if not present, for better TTS
+                                                if return_string and not return_string.endswith('.'):
+                                                    return_string += "."
+                                                function_responses.append(
+                                                    {
+                                                        "name": name,
+                                                        "response": {"result": return_string},
+                                                        "id": call_id,
+                                                        "scheduling": "WHEN_IDLE"
+                                                    }
+                                                )
+                                        else:
+                                            print(f"Think_and_repeat_output called but 'user_input' not in args: {args}")
 
-                                # Handle end conversation function
-                                elif name == "end_conversation":
-                                    goodbye_message = args.get("goodbye_message", "Goodbye! Have a great day!")
-                                    print(f"👋 Ending conversation: {goodbye_message}")
+                                    # Handle end conversation function
+                                    elif name == "end_conversation":
+                                        goodbye_message = args.get("goodbye_message", "Goodbye! Have a great day!")
+                                        print(f"👋 Ending conversation: {goodbye_message}")
                                     
-                                    # Send response to Gemini to acknowledge the tool call
-                                    # This will cause Gemini to generate the goodbye audio
-                                    gemini_end_response = types.FunctionResponse(
-                                        id=call_id,
-                                        name=name,
-                                        response={"result": "Conversation ended successfully"}
-                                    )
-                                    await gemini_session.send_tool_response(function_responses=[gemini_end_response])
-                                    print("✅ Sent end_conversation response to Gemini, waiting for goodbye audio...")
+                                        # Send response to Gemini to acknowledge the tool call
+                                        # This will cause Gemini to generate the goodbye audio
+                                        gemini_end_response = types.FunctionResponse(
+                                            id=call_id,
+                                            name=name,
+                                            response={"result": "Conversation ended successfully"}
+                                        )
+                                        await gemini_session.send_tool_response(function_responses=[gemini_end_response])
+                                        print("✅ Sent end_conversation response to Gemini, waiting for goodbye audio...")
                                     
-                                    # Set flag to close after we receive and send the goodbye audio
-                                    should_close_after_audio = True
+                                        # Set flag to close after we receive and send the goodbye audio
+                                        should_close_after_audio = True
                                     
-                                    # Don't return here - continue in the loop to receive the audio response
+                                        # Don't return here - continue in the loop to receive the audio response
+                                        continue
+
+
+                                # Send function responses back to Gemini (only if we have actual responses)
+                                if function_responses:
+                                    print(f"📤 Sending tool response to Gemini ({len(function_responses)} response(s))...")
+                                    first_result = function_responses[0].get("response", {}).get("result", "")
+                                    print(f"   result preview: {(first_result[:80] + '...') if len(first_result) > 80 else first_result}")
+                                
+                                    # Add function responses to scratchpad
+                                    for func_response in function_responses:
+                                        scratchpad.add_entry(
+                                            source="agent",
+                                            format="function_call",
+                                            name=func_response["name"],
+                                            response=func_response["response"],
+                                            call_id=func_response["id"]
+                                        )
+                                
+                                    # Create proper FunctionResponse objects
+                                    gemini_function_responses = []
+                                    for response in function_responses:
+                                        gemini_response = types.FunctionResponse(
+                                            id=response["id"],
+                                            name=response["name"],
+                                            response=response["response"]
+                                        )
+                                        gemini_function_responses.append(gemini_response)
+                                
+                                    try:
+                                        # Add timeout for tool response sending to prevent hang during connection closure
+                                        await asyncio.wait_for(
+                                            gemini_session.send_tool_response(function_responses=gemini_function_responses),
+                                            timeout=10.0
+                                        )
+                                        print("Finished sending function responses")
+                                    except (asyncio.TimeoutError, Exception) as e:
+                                        print(f"⚠️ Timeout or error sending tool response (connection may be closing): {e}")
+                                        # Continue execution - connection may already be closing
                                     continue
-
-
-                            # Send function responses back to Gemini (only if we have actual responses)
-                            if function_responses:
-                                print(f"📤 Sending tool response to Gemini ({len(function_responses)} response(s))...")
-                                first_result = function_responses[0].get("response", {}).get("result", "")
-                                print(f"   result preview: {(first_result[:80] + '...') if len(first_result) > 80 else first_result}")
-                                
-                                # Add function responses to scratchpad
-                                for func_response in function_responses:
-                                    scratchpad.add_entry(
-                                        source="agent",
-                                        format="function_call",
-                                        name=func_response["name"],
-                                        response=func_response["response"],
-                                        call_id=func_response["id"]
-                                    )
-                                
-                                # Create proper FunctionResponse objects
-                                gemini_function_responses = []
-                                for response in function_responses:
-                                    gemini_response = types.FunctionResponse(
-                                        id=response["id"],
-                                        name=response["name"],
-                                        response=response["response"]
-                                    )
-                                    gemini_function_responses.append(gemini_response)
-                                
-                                try:
-                                    # Add timeout for tool response sending to prevent hang during connection closure
-                                    await asyncio.wait_for(
-                                        gemini_session.send_tool_response(function_responses=gemini_function_responses),
-                                        timeout=10.0
-                                    )
-                                    print("Finished sending function responses")
-                                except (asyncio.TimeoutError, Exception) as e:
-                                    print(f"⚠️ Timeout or error sending tool response (connection may be closing): {e}")
-                                    # Continue execution - connection may already be closing
-                                continue
+                            finally:
+                                if has_think_turn:
+                                    scratchpad.end_interstitial_ack_window()
 
                         server_content = response.server_content
 
@@ -522,6 +554,11 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         # Forward audio parts immediately (streaming) - identical to working example
                         if server_content and server_content.model_turn:
                             for part in server_content.model_turn.parts:
+                                ptext = getattr(part, "text", None)
+                                if isinstance(ptext, str) and ptext.strip():
+                                    await transcription_handler.handle_output_transcription(
+                                        SimpleNamespace(text=ptext)
+                                    )
                                 if part.inline_data:
                                     # Use the audio manager to add audio
                                     audio_manager.add_audio(part.inline_data.data)

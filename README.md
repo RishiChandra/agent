@@ -20,11 +20,28 @@ Deactivate with...```deactivate```
 
 Remember to set a venv in both the test folder and the root folder. Additionally a .env file
 
-## Agent Developmet
-The Agent logic lives in the app dir. *This should eventually be renamed
-To run a local websocket server, run ```python main.py```
+### Windows: Opus native library (for `opuslib` / realtime audio)
 
-To test (local vs deployed can be configured in the test), run ```python -m app.test_ws``` from the test directory
+The `opuslib` package is only a Python binding. It loads the **native Opus DLL** (`opus.dll`). The `pip install` step installs `opuslib` but **does not** install that DLL.
+
+Root venv:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\install_opus_windows.py
+```
+
+Separate **test** venv (only if you use `test\.venv`):
+
+```powershell
+.\test\.venv\Scripts\python.exe scripts\install_opus_windows.py
+```
+
+## Agent Developmet
+The Agent logic lives in the app dir. *This should eventually be renamed*
+
+To run a local websocket server, run ```python app/main.py```
+
+To test (local vs deployed can be configured in the test), run ```python test/app/test_ws.py``` from the repo root (or `cd test/app` then ```python test_ws.py```)
 
 Run ```python -m app.test_proactive_messaging``` from the test directory too to make sure that proactive messaging works
 

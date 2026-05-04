@@ -11,6 +11,7 @@ from .tool_agents.delete_tasks_tool_agent import DeleteTasksToolAgent
 from .tool_agents.send_message_tool_agent import SendMessageToolAgent
 from .tool_agents.generate_response_tool_agent import GenerateResponseToolAgent
 from .utils.scratchpad_utils import check_if_already_processed, build_chat_history_from_scratchpad
+from .utils.text_utils import normalize_text
 
 class GeneralThinkingAgent:
     tool_agents = {}
@@ -130,8 +131,14 @@ class GeneralThinkingAgent:
         # Convert scratchpad entries to chat history format if scratchpad is provided
         chat_history = build_chat_history_from_scratchpad(scratchpad_entries, user_input)
         
-        # Add the current user input
-        chat_history.append({"role": "user", "content": user_input})
+        # Avoid duplicating the latest user turn (scratchpad often already has this utterance)
+        _ui = normalize_text(user_input)
+        if not (
+            chat_history
+            and chat_history[-1].get("role") == "user"
+            and normalize_text(chat_history[-1].get("content", "")) == _ui
+        ):
+            chat_history.append({"role": "user", "content": user_input})
         
         # Debug: Print chat history to see what the agent is seeing
         print(f"📜 Chat history for tool selection: {chat_history}")

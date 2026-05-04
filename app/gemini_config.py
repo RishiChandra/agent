@@ -13,13 +13,20 @@ from google.genai.types import (
     Schema,
     Type,
 )
+
+try:
+    from google.genai.types import ThinkingConfig, ThinkingLevel
+except ImportError:  # google-genai < ~1.70 (e.g. stale test venvs)
+    ThinkingConfig = None  # type: ignore[misc, assignment]
+    ThinkingLevel = None  # type: ignore[misc, assignment]
+
 from user_config import UserConfigData
 
 # ===== Gemini config =====
 PROJECT_ID = "ai-pin-465902"
 LOCATION = "us-central1"
 # Live API (bidiGenerateContent): use Google AI model ID, not Vertex "gemini-live-*"
-MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+MODEL = "gemini-3.1-flash-live-preview"
 client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
 
 # ===== Audio Config =====
@@ -221,6 +228,21 @@ def get_live_config(config_data: UserConfigData) -> LiveConnectConfig:
         timezone=timezone,
     )
 
+    # Gemini 3.1 Live: thinkingLevel (needs google-genai >= ~1.70).
+    if ThinkingConfig is not None and ThinkingLevel is not None:
+        return LiveConnectConfig(
+            response_modalities=[Modality.AUDIO],
+            output_audio_transcription=AudioTranscriptionConfig(),
+            input_audio_transcription=AudioTranscriptionConfig(),
+            speech_config=SpeechConfig(
+                voice_config=VoiceConfig(
+                    prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Aoede")
+                )
+            ),
+            thinking_config=ThinkingConfig(thinking_level=ThinkingLevel.LOW),
+            system_instruction=system_instruction,
+            tools=[{"google_search": {}}, think_tool, end_conversation_tool],
+        )
     return LiveConnectConfig(
         response_modalities=[Modality.AUDIO],
         output_audio_transcription=AudioTranscriptionConfig(),

@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from utils import (
     FORMAT, CHANNELS, INPUT_RATE, OUTPUT_RATE, CHUNK,
     _connection_ring, _disconnection_ring,
+    decode_websocket_audio_for_playback,
 )
 
 class AudioManager:
@@ -89,8 +90,8 @@ async def test_ws():
     user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
 
     # Azure App Service Web App (dual-stack: IPv4 + IPv6). Container App URL is retired.
-    uri = f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{user_id}"
-    # uri = f"ws://localhost:8000/ws/{user_id}"  # local dev
+    # uri = f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{user_id}"
+    uri = f"ws://localhost:8000/ws/{user_id}"  # local dev
     audio_mgr = AudioManager()
     
     try:
@@ -129,8 +130,9 @@ async def test_ws():
                             audio_mgr.interrupt()  # Clear client-side audio queue
                             continue
                         elif "audio" in data:
-                            audio_bytes = base64.b64decode(data["audio"])
-                            audio_mgr.queue_audio(audio_bytes)
+                            pcm = decode_websocket_audio_for_playback(data)
+                            if pcm:
+                                audio_mgr.queue_audio(pcm)
                         elif "turn_complete" in data:
                             print("✅ Turn complete")
                         elif "output_text" in data:

@@ -2,6 +2,9 @@
 
 from .text_utils import normalize_text, should_skip_fragmented_entry
 
+# Must match ``Scratchpad.SPEECH_PHASE_PRE_TOOL_ACK`` (agent rows tagged during Live tool turns).
+SPEECH_PHASE_PRE_TOOL_ACK = "interstitial_ack"
+
 
 def check_if_already_processed(scratchpad, user_input):
     """Check if this exact input was already processed (to prevent infinite loops).
@@ -32,11 +35,15 @@ def check_if_already_processed(scratchpad, user_input):
                 # Check if there's already a completed response after this user input
                 # Look ahead in scratchpad to see if this was already processed
                 for later_entry in scratchpad[i + 1:]:
-                    # Check for function_call response (definite completion)
-                    if (later_entry.get("format") == "function_call" and 
-                        later_entry.get("source") == "agent" and 
-                        later_entry.get("response") and 
-                        later_entry.get("response").get("result")):
+                    # Tool outcomes only — not think_and_repeat_output (that record is written as soon
+                    # as the Live tool returns, before the spoken answer, so it would false-positive).
+                    if (
+                        later_entry.get("format") == "function_call"
+                        and later_entry.get("source") == "agent"
+                        and later_entry.get("name") != "think_and_repeat_output"
+                        and later_entry.get("response")
+                        and later_entry.get("response").get("result")
+                    ):
                         print(f"⚠️ Duplicate user input detected (already processed with function_call), skipping: {user_input[:50]}...")
                         return "This request has already been processed. Please check the previous response."
                     # Check for assistant responses that indicate completion (not just acknowledgments)
@@ -44,11 +51,10 @@ def check_if_already_processed(scratchpad, user_input):
                         later_entry.get("source") == "agent" and 
                         later_entry.get("content")):
                         content = later_entry.get("content", "")
-                        # Skip if it's just a brief acknowledgment (like "Let me check", "One moment")
-                        acknowledgment_phrases = ["let me check", "one moment", "looking", "checking"]
-                        is_acknowledgment = any(phrase in content.lower() for phrase in acknowledgment_phrases) and len(content) < 50
-                        # If it's a substantial response (not just an acknowledgment), it was already processed
-                        if not is_acknowledgment and len(content) > 20:
+                        # Pre-tool agent lines are tagged on commit (see Scratchpad interstitial window)
+                        if later_entry.get("speech_phase") == SPEECH_PHASE_PRE_TOOL_ACK:
+                            continue
+                        if len(content) > 20:
                             print(f"⚠️ Duplicate user input detected (already processed with assistant response), skipping: {user_input[:50]}...")
                             return "This request has already been processed. Please check the previous response."
                     # If we encounter another user input before finding a response, stop checking this instance
@@ -86,13 +92,24 @@ def build_chat_history_from_scratchpad(scratchpad, user_input):
                 # Skip fragmented/incomplete audio transcriptions
                 if should_skip_fragmented_entry(entry_content, user_input):
                     continue
-                
+
+                # ASR / scratchpad can repeat the same user line; avoid back-to-back duplicates
+                nu = normalize_text(entry_content)
+                if (
+                    chat_history
+                    and chat_history[-1].get("role") == "user"
+                    and normalize_text(chat_history[-1].get("content", "")) == nu
+                ):
+                    continue
+
                 chat_history.append({
                     "role": "user",
                     "content": entry_content
                 })
-            # Agent responses
+            # Agent responses (skip interstitial ack rows — not part of tool-relevant dialog)
             elif entry.get("source") == "agent" and entry.get("content"):
+                if entry.get("speech_phase") == SPEECH_PHASE_PRE_TOOL_ACK:
+                    continue
                 chat_history.append({
                     "role": "assistant",
                     "content": entry["content"]

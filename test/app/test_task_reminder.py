@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from utils import (
     FORMAT, CHANNELS, INPUT_RATE, OUTPUT_RATE, CHUNK,
     _connection_ring, _disconnection_ring,
+    decode_websocket_audio_for_playback,
 )
 
 load_dotenv()
@@ -149,8 +150,9 @@ async def recv_audio(ws, audio_mgr: AudioManager, on_disconnected=None):
                 print("🛑 Interrupt received")
                 audio_mgr.interrupt()
             elif "audio" in data:
-                audio_bytes = base64.b64decode(data["audio"])
-                audio_mgr.queue_audio(audio_bytes)
+                pcm = decode_websocket_audio_for_playback(data)
+                if pcm:
+                    audio_mgr.queue_audio(pcm)
             elif "output_text" in data:
                 print(f"🗣️ Server: {data['output_text']}")
             elif "input_text" in data:

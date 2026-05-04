@@ -32,7 +32,15 @@ load_dotenv(os.path.join(project_root, ".env"))
 # Override DB_* with LOCAL_DB_* so the app and cleanup both use the local database
 os.environ["DB_HOST"] = os.environ["LOCAL_DB_HOST"]
 os.environ["DB_PORT"] = os.environ.get("LOCAL_DB_PORT", "5432")
-os.environ["DB_NAME"] = os.environ["LOCAL_DB_NAME"]
+_local_db = os.environ.get("LOCAL_DB_NAME", "local").strip()
+if _local_db.lower() == "postgres":
+    raise SystemExit(
+        '\nLOCAL_DB_NAME must not be "postgres" for integration tests (default admin DB, easy to confuse with app data).\n'
+        "Run:  python test/setup_local_postgres.py\n"
+        "Then in repo root .env set:  LOCAL_DB_NAME=local\n"
+    )
+os.environ["LOCAL_DB_NAME"] = _local_db
+os.environ["DB_NAME"] = _local_db
 os.environ["DB_USER"] = os.environ["LOCAL_DB_USER"]
 os.environ["DB_PASSWORD"] = os.environ.get("LOCAL_DB_PASSWORD", "")
 
@@ -217,6 +225,48 @@ def _db_connect():
     )
 
 
+def _ensure_db_connection() -> None:
+    """Exit early with a clear message if local Postgres is not reachable."""
+    import psycopg2
+    host = os.environ["DB_HOST"]
+    port = os.environ.get("DB_PORT", "5432")
+    try:
+        conn = _db_connect()
+        conn.close()
+    except psycopg2.OperationalError as e:
+        raise SystemExit(
+            f"\nCannot connect to PostgreSQL at {host}:{port}.\n"
+            "This integration test snapshots and cleans DB tables; a running server is required.\n"
+            "- Start PostgreSQL (Windows: Win+R → services.msc → start the PostgreSQL service).\n"
+            "- Match .env LOCAL_DB_HOST / LOCAL_DB_PORT / LOCAL_DB_NAME / LOCAL_DB_USER / LOCAL_DB_PASSWORD.\n"
+            "Create the schema:  python test/setup_local_postgres.py  (from repo root)\n\n"
+            f"Underlying error: {e}\n"
+        ) from e
+
+
+def _ensure_app_schema() -> None:
+    """Exit if LOCAL_DB_NAME points at a database without the app schema."""
+    conn = _db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'sessions' LIMIT 1"
+        )
+        if cur.fetchone() is None:
+            db = os.environ.get("DB_NAME", "?")
+            raise SystemExit(
+                f'\nDatabase "{db}" has no public.sessions table.\n'
+                "Set LOCAL_DB_NAME in the repo root .env to the database where you ran "
+                "psql ... -f schema.sql (usually local, not postgres).\n"
+                f"Current value: LOCAL_DB_NAME={db!r}\n"
+                "Create the schema:  python test/setup_local_postgres.py  (from repo root)\n"
+            )
+        cur.close()
+    finally:
+        conn.close()
+
+
 def _run_db_query(query: str) -> None:
     """Execute a raw SQL statement against the local database."""
     conn = _db_connect()
@@ -399,6 +449,8 @@ async def run_server_and_test() -> None:
 
     frozen = TEST_FROZEN_TIME
     print(f"⏱  Frozen test time: {frozen.strftime('%A, %B %d, %Y at %I:%M %p (%Z)')}")
+    _ensure_db_connection()
+    _ensure_app_schema()
 
     def _frozen_now(tz=None):
         return frozen.astimezone(tz) if tz else frozen

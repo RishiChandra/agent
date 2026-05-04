@@ -16,7 +16,7 @@ psycopg2-binary
 
 # LLM / AI
 openai
-google-genai
+google-genai>=1.70.0
 
 # Azure (device SDK has wheels; service SDK optional, see below)
 azure-servicebus

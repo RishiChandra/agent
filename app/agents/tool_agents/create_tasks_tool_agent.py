@@ -6,6 +6,7 @@ from database import execute_update, update_task_enqueue_sequence_id
 from psycopg2.extras import Json
 
 from ..gemini_client import call_gemini, gemini_response_to_openai_like
+from ..utils.text_utils import normalize_text
 from enqueue.task_enqueue import enqueue_task
 
 class CreateTasksToolAgent:
@@ -33,22 +34,26 @@ class CreateTasksToolAgent:
                 most_recent_user_message = msg.get("content", "")
                 break
         
-        # Check chat history for already-created tasks (only count those created AFTER the most recent user message)
+        # Tasks already created for *this* user turn only: scan after the LAST matching user message
+        # (duplicate user lines in history used to anchor at the first match and mis-count).
         created_tasks = []
-        found_most_recent_user = False
-        for msg in chat_history:
-            if msg.get("role") == "user" and msg.get("content") == most_recent_user_message:
-                found_most_recent_user = True
-                continue
-            if found_most_recent_user and msg.get("name") == "create_tasks_tool" and msg.get("content"):
-                try:
-                    content = json.loads(msg["content"]) if isinstance(msg["content"], str) else msg["content"]
-                    if content.get("success") and content.get("task_info"):
-                        task_info = content.get("task_info", {})
-                        task_desc = task_info.get("info", "") if isinstance(task_info, dict) else str(task_info)
-                        created_tasks.append(task_desc.lower().strip())
-                except:
-                    pass
+        if most_recent_user_message:
+            mr_norm = normalize_text(most_recent_user_message)
+            start_after = -1
+            for idx, msg in enumerate(chat_history):
+                if msg.get("role") == "user" and normalize_text(msg.get("content", "")) == mr_norm:
+                    start_after = idx
+            if start_after >= 0:
+                for msg in chat_history[start_after + 1 :]:
+                    if msg.get("name") == "create_tasks_tool" and msg.get("content"):
+                        try:
+                            content = json.loads(msg["content"]) if isinstance(msg["content"], str) else msg["content"]
+                            if content.get("success") and content.get("task_info"):
+                                task_info = content.get("task_info", {})
+                                task_desc = task_info.get("info", "") if isinstance(task_info, dict) else str(task_info)
+                                created_tasks.append(task_desc.lower().strip())
+                        except Exception:
+                            pass
         
         system_content = (
             f"Given the chat history {chat_history}, the assistant has decided to use the {self.name}."
