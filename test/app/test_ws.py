@@ -8,12 +8,23 @@ from collections import deque
 import signal
 import sys
 
+# macOS Homebrew installs libopus at /opt/homebrew/lib. opuslib (loaded by
+# utils.decode_websocket_audio_for_playback) uses ctypes.util.find_library,
+# which may miss that path. Add it before utils import.
+if sys.platform == "darwin":
+    _brew_lib = "/opt/homebrew/lib"
+    if os.path.isdir(_brew_lib):
+        os.environ["DYLD_LIBRARY_PATH"] = (
+            _brew_lib + ":" + os.environ.get("DYLD_LIBRARY_PATH", "")
+        )
+
 sys.path.insert(0, os.path.dirname(__file__))
 from utils import (
     FORMAT, CHANNELS, INPUT_RATE, OUTPUT_RATE, CHUNK,
     _connection_ring, _disconnection_ring,
     decode_websocket_audio_for_playback,
 )
+
 
 class AudioManager:
     def __init__(self):
@@ -90,16 +101,21 @@ async def test_ws():
     user_id = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
 
     # Azure App Service Web App (dual-stack: IPv4 + IPv6). Container App URL is retired.
-    # uri = f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{user_id}"
-    uri = f"ws://localhost:8000/ws/{user_id}"  # local dev
+    uri = f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/{user_id}"
+    # uri = f"ws://localhost:8000/ws/{user_id}"  # local dev
     audio_mgr = AudioManager()
-    
+
     try:
         await audio_mgr.init()
-        
+
         disconnection_played = False
 
-        async with websockets.connect(uri) as ws:
+        # open_timeout=60 covers Azure App Service cold-start (alwaysOn=true
+        # mitigates this, but first connect after deploy can still be slow).
+        # ping_interval=20 keeps NAT/load-balancer from idling the conn.
+        async with websockets.connect(
+            uri, open_timeout=60, ping_interval=20, ping_timeout=20, max_size=None
+        ) as ws:
             print("✅ Connected to FastAPI WebSocket")
             await asyncio.to_thread(_connection_ring, audio_mgr.p)
 
@@ -107,7 +123,9 @@ async def test_ws():
                 """Continuously capture mic and send to server"""
                 while audio_mgr.is_running:
                     try:
-                        mic_chunk = audio_mgr.read_mic()
+                        # Run blocking PyAudio read in thread so event loop
+                        # stays responsive for recv_audio.
+                        mic_chunk = await asyncio.to_thread(audio_mgr.read_mic)
                         msg = {
                             "audio": base64.b64encode(mic_chunk).decode("utf-8")
                         }
@@ -124,7 +142,7 @@ async def test_ws():
                     try:
                         resp = await ws.recv()
                         data = json.loads(resp)
-                        
+
                         if "interrupt" in data and data["interrupt"]:
                             print("🛑 Interrupt signal received from server")
                             audio_mgr.interrupt()  # Clear client-side audio queue
@@ -141,7 +159,7 @@ async def test_ws():
                             print(f"👤 You said: {data['input_text']}")
                         elif "error" in data:
                             print(f"❌ Server error: {data['error']}")
-                            
+
                     except websockets.exceptions.ConnectionClosed:
                         print("❌ WebSocket connection closed")
                         disconnection_played = True
@@ -172,7 +190,7 @@ def signal_handler(sig, frame):
 if __name__ == "__main__":
     # Set up signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     try:
         asyncio.run(test_ws())
     except KeyboardInterrupt:
