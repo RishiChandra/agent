@@ -1,8 +1,13 @@
-import json
-import base64
+"""Downlink playback + uplink Opus decode for the developer STT/TTS path (no Gemini)."""
+
 import asyncio
+import base64
+import json
+import traceback
 from collections import deque
+
 from fastapi import WebSocket
+from starlette.websockets import WebSocketState
 
 from audio_codec import (
     COALESCE_TARGET_MS,
@@ -18,24 +23,27 @@ from audio_codec import (
     rms_int16_le,
 )
 
-# Back-compat re-exports for callers that imported constants from audio_manager.
-SAMPLE_RATE = DOWNLINK_SAMPLE_RATE
+
+def _websocket_connected(ws: WebSocket) -> bool:
+    try:
+        return ws.client_state == WebSocketState.CONNECTED
+    except Exception:
+        return False
 
 
-class AudioManager:
-    """Audio queues and downlink encoding for the Gemini Live websocket path."""
+class DeveloperSpeechAudioManager:
+    """Uplink Opus/PCM decode and downlink Opus TLV (or PCM) send for TTS playback."""
 
     def __init__(self, websocket: WebSocket):
         self.websocket = websocket
-        self.audio_queue = asyncio.Queue()
-        self.audio_playback_queue = deque()
+        self.audio_playback_queue: deque = deque()
         self.playback_task = None
         self._turn_active = False
         self._wake_event = asyncio.Event()
         self._emit_seq = 0
         self._emit_t0 = asyncio.get_event_loop().time()
-        self._gemini_seq = 0
-        self._last_gemini_recv_ms = None
+        self._chunk_seq = 0
+        self._last_chunk_recv_ms = None
         self._downlink = DownlinkOpusEncoder()
         self._uplink_decoder = UplinkOpusDecoder()
 
@@ -47,67 +55,63 @@ class AudioManager:
     ) -> bytes:
         return self._uplink_decoder.decode_tlv(tlv, sample_rate, frame_samples)
 
-    def add_audio(self, audio_data):
+    def add_playback_pcm(self, pcm: bytes) -> None:
+        """Queue int16 mono PCM at DOWNLINK_SAMPLE_RATE (e.g. from TTS) for Opus encode + send."""
+        if not pcm or not _websocket_connected(self.websocket):
+            return
         self._turn_active = True
-        rms = rms_int16_le(audio_data)
-        chunk_ms = int((len(audio_data) / 2) * 1000 / DOWNLINK_SAMPLE_RATE)
+        rms = rms_int16_le(pcm)
+        chunk_ms = int((len(pcm) / 2) * 1000 / DOWNLINK_SAMPLE_RATE)
         loop = asyncio.get_event_loop()
         t_recv_ms = int((loop.time() - self._emit_t0) * 1000)
-        self._gemini_seq += 1
-        gseq = self._gemini_seq
-        dt_gemini = (
-            (t_recv_ms - self._last_gemini_recv_ms)
-            if self._last_gemini_recv_ms is not None
+        self._chunk_seq += 1
+        seq = self._chunk_seq
+        dt = (
+            (t_recv_ms - self._last_chunk_recv_ms)
+            if self._last_chunk_recv_ms is not None
             else 0
         )
-        self._last_gemini_recv_ms = t_recv_ms
+        self._last_chunk_recv_ms = t_recv_ms
         is_silent = rms < SILENCE_DROP_RMS
 
         if self._downlink.uses_opus:
-            opus_packets = self._downlink.encode_pcm(audio_data)
+            opus_packets = self._downlink.encode_pcm(pcm)
             if not opus_packets:
                 return
             for pkt in opus_packets:
-                self.audio_playback_queue.append((pkt, gseq, t_recv_ms, OPUS_FRAME_MS))
-            opus_total = sum(len(p) for p in opus_packets)
+                self.audio_playback_queue.append((pkt, seq, t_recv_ms, OPUS_FRAME_MS))
             print(
-                f"🎙️ Gemini chunk in: gseq={gseq} t_recv={t_recv_ms}ms dt_gemini={dt_gemini}ms "
-                f"pcm={len(audio_data)}B opus={opus_total}B (~{chunk_ms}ms, {len(opus_packets)} frames) "
-                f"rms={rms}{' SILENT' if is_silent else ''} qdepth={len(self.audio_playback_queue)}"
+                f"[tts_audio] pcm in seq={seq} t_recv={t_recv_ms}ms dt={dt}ms "
+                f"pcm={len(pcm)}B opus={sum(len(p) for p in opus_packets)}B "
+                f"(~{chunk_ms}ms, {len(opus_packets)} fr) rms={rms}"
+                f"{' SILENT' if is_silent else ''} q={len(self.audio_playback_queue)}"
             )
         else:
-            self.audio_playback_queue.append((audio_data, gseq, t_recv_ms, chunk_ms))
+            self.audio_playback_queue.append((pcm, seq, t_recv_ms, chunk_ms))
             print(
-                f"🎙️ Gemini chunk in: gseq={gseq} t_recv={t_recv_ms}ms dt_gemini={dt_gemini}ms "
-                f"PCM {len(audio_data)}B (~{chunk_ms}ms) "
-                f"rms={rms}{' SILENT' if is_silent else ''} qdepth={len(self.audio_playback_queue)}"
+                f"[tts_audio] PCM out seq={seq} t_recv={t_recv_ms}ms dt={dt}ms "
+                f"{len(pcm)}B (~{chunk_ms}ms) rms={rms} q={len(self.audio_playback_queue)}"
             )
         self._wake_event.set()
 
         if self.playback_task is None or self.playback_task.done():
             self.playback_task = asyncio.create_task(self._play_audio())
 
-    def mark_turn_complete(self):
+    def mark_turn_complete(self) -> None:
         for pkt in self._downlink.flush_residual():
-            self._gemini_seq += 1
+            self._chunk_seq += 1
             t_recv_ms = int((asyncio.get_event_loop().time() - self._emit_t0) * 1000)
             self.audio_playback_queue.append(
-                (pkt, self._gemini_seq, t_recv_ms, OPUS_FRAME_MS)
+                (pkt, self._chunk_seq, t_recv_ms, OPUS_FRAME_MS)
             )
-            print(
-                f"🧹 Flushed downlink PCM residual as final Opus frame ({len(pkt)}B)"
-            )
+            print(f"[tts_audio] flushed residual Opus ({len(pkt)}B)")
 
-        print(f"🏁 mark_turn_complete called (qdepth={len(self.audio_playback_queue)})")
         self._turn_active = False
         self._wake_event.set()
 
-    async def _play_audio(self):
+    async def _play_audio(self) -> None:
         loop = asyncio.get_event_loop()
         emit_idx = 0
-        print(
-            f"🎬 _play_audio START (turn_active={self._turn_active} qdepth={len(self.audio_playback_queue)})"
-        )
         try:
             while self._turn_active or self.audio_playback_queue:
                 if not self.audio_playback_queue:
@@ -134,7 +138,9 @@ class AudioManager:
                             break
                         self._wake_event.clear()
                         try:
-                            await asyncio.wait_for(self._wake_event.wait(), timeout=remaining)
+                            await asyncio.wait_for(
+                                self._wake_event.wait(), timeout=remaining
+                            )
                         except asyncio.TimeoutError:
                             break
                         if not self.audio_playback_queue:
@@ -164,7 +170,9 @@ class AudioManager:
                         "gseq_first": gseq_first,
                         "gseq_last": gseq_last,
                     }
-                    payload_log = f"OPUS {sum(len(p) for p in opus_packets)}B+TLV→{len(packed)}B"
+                    payload_log = (
+                        f"OPUS {sum(len(p) for p in opus_packets)}B+TLV→{len(packed)}B"
+                    )
                 else:
                     pcm_blob = b"".join(opus_packets)
                     payload = {
@@ -178,26 +186,50 @@ class AudioManager:
                     payload_log = f"PCM {len(pcm_blob)}B"
 
                 t_send_start = loop.time()
-                await self.websocket.send_text(json.dumps(payload))
+                if not _websocket_connected(self.websocket):
+                    self._turn_active = False
+                    self.audio_playback_queue.clear()
+                    self._downlink.clear()
+                    break
+                try:
+                    await self.websocket.send_text(json.dumps(payload))
+                except Exception as e:
+                    print(
+                        f"[tts_audio] send stopped ({type(e).__name__}): {e!r}"
+                    )
+                    self._turn_active = False
+                    self.audio_playback_queue.clear()
+                    self._downlink.clear()
+                    break
                 send_ms = (loop.time() - t_send_start) * 1000
-
                 emit_idx += 1
                 print(
-                    f"📤 emit#{emit_idx} seq={seq} t_emit={t_emit_ms}ms "
-                    f"gseq=[{gseq_first}..{gseq_last}] n={n_bundled} dwell={dwell_ms}ms "
-                    f"{payload_log} (~{bundled_ms}ms) "
-                    f"send={send_ms:.0f}ms qdepth={len(self.audio_playback_queue)}"
+                    f"[tts_audio] emit#{emit_idx} seq={seq} t_emit={t_emit_ms}ms "
+                    f"chunk_seq=[{gseq_first}..{gseq_last}] n={n_bundled} dwell={dwell_ms}ms "
+                    f"{payload_log} (~{bundled_ms}ms) send={send_ms:.0f}ms "
+                    f"q={len(self.audio_playback_queue)}"
                 )
-            print(f"🎬 _play_audio END (emits={emit_idx})")
         except asyncio.CancelledError:
-            print(f"🎬 _play_audio CANCELLED (emits={emit_idx})")
             raise
         except Exception as e:
-            print(f"❌ Error playing audio: {e}")
+            print(f"[tts_audio] playback error: {type(e).__name__}: {e!r}")
+            traceback.print_exc()
 
-    async def interrupt(self):
-        print("🛑 Interrupting audio playback...")
+    async def shutdown_playback(self) -> None:
+        """Stop playback without notifying the client (e.g. server shutdown or socket already dead)."""
+        self._turn_active = False
+        self.audio_playback_queue.clear()
+        self._downlink.clear()
+        self._wake_event.set()
+        if self.playback_task and not self.playback_task.done():
+            self.playback_task.cancel()
+            try:
+                await self.playback_task
+            except asyncio.CancelledError:
+                pass
+        self.playback_task = None
 
+    async def interrupt(self) -> None:
         self._turn_active = False
         self.audio_playback_queue.clear()
         self._downlink.clear()
@@ -209,17 +241,15 @@ class AudioManager:
                 await self.playback_task
             except asyncio.CancelledError:
                 pass
-
         self.playback_task = None
 
-        try:
-            await self.websocket.send_text(json.dumps({"interrupt": True}))
-        except Exception as e:
-            print(f"Error sending interrupt signal: {e}")
+        if _websocket_connected(self.websocket):
+            try:
+                await self.websocket.send_text(json.dumps({"interrupt": True}))
+            except Exception as e:
+                print(f"[tts_audio] interrupt notify failed: {e}")
 
-        print("✅ Audio playback interrupted and cleared")
-
-    def is_playing(self):
+    def is_playing(self) -> bool:
         return bool(self.audio_playback_queue) or (
             self.playback_task and not self.playback_task.done()
         )

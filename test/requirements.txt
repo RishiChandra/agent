@@ -6,6 +6,8 @@ uvicorn[standard]
 gunicorn
 python-dotenv
 google-genai>=1.70.0
+vosk
+pyttsx3
 httpx
 requests
 tzdata

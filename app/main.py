@@ -9,6 +9,7 @@ load_dotenv()
 from routes.task_routes import router
 from routes.messaging_routes import router as messaging_router
 from websocket_handler import websocket_endpoint
+from developer_ws.websocket import developer_websocket_endpoint
 
 app = FastAPI()
 
@@ -16,8 +17,9 @@ app = FastAPI()
 app.include_router(router)
 app.include_router(messaging_router)
 
-# Register WebSocket endpoint
+# Register WebSocket endpoints
 app.websocket("/ws/{user_id}")(websocket_endpoint)
+app.websocket("/ws/developer/{user_id}")(developer_websocket_endpoint)
 
 if __name__ == "__main__":
     import uvicorn
