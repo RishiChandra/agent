@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
@@ -9,15 +11,29 @@ load_dotenv()
 from routes.task_routes import router
 from routes.messaging_routes import router as messaging_router
 from websocket_handler import websocket_endpoint
+from developer_ws import developer_websocket_endpoint, preload_vosk_model
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Warm Vosk during startup so the first STT call doesn't pay 5–10s of cold-load.
+    try:
+        await preload_vosk_model()
+        print("[main] vosk model preloaded")
+    except Exception as e:
+        print(f"[main] vosk preload failed: {e}")
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Include all HTTP endpoints from routes
 app.include_router(router)
 app.include_router(messaging_router)
 
-# Register WebSocket endpoint
+# Register WebSocket endpoints
 app.websocket("/ws/{user_id}")(websocket_endpoint)
+app.websocket("/ws/developer/{user_id}")(developer_websocket_endpoint)
 
 if __name__ == "__main__":
     import uvicorn

@@ -44,6 +44,12 @@ ENV/
 .venv/
 .env
 
+# Offline Vosk models (large downloads)
+vosk-model-*/
+
+# Claude Code local state (worktrees, settings)
+.claude/
+
 # IDE
 .vscode/
 .idea/
