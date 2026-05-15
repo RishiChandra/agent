@@ -1,4 +1,10 @@
-"""Per-connection audio I/O: uplink Opus decode + downlink Opus encode/coalesce/send."""
+"""Per-connection audio I/O.
+
+Uplink: receives raw or Opus-encoded PCM frames from the client and decodes to int16 mono PCM.
+Downlink: takes generated PCM (TTS or bridge-relay), Opus-encodes (or falls back to raw),
+coalesces into batches, and writes to the client WebSocket. `mark_turn_complete` flushes any
+partial Opus residual so the user always hears the tail of an assistant turn.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +41,23 @@ QueueItem = Tuple[bytes, int, int, int]
 
 
 class AudioIO:
-    """Decodes uplink frames and pumps TTS PCM downlink, coalescing Opus frames into one message."""
+    """Per-session audio gateway. One per WebSocket.
+
+    Constructed by: `developer_websocket_endpoint` in endpoint.py.
+    Used by:
+      - `_decode_audio_payload` in endpoint.py → `decode_uplink_opus(tlv)` for Opus
+        uplinks; raw uplinks bypass this.
+      - `pipeline._speak` → `add_playback_pcm(pcm)` to queue TTS output.
+      - `bridge._recv_loop` → `add_playback_pcm(pcm)` to queue remote bridge audio.
+      - `pipeline._speak`, `pipeline.flush`, `pipeline._handle_tool_call` →
+        `mark_turn_complete()` to flush Opus residual at turn boundaries.
+      - `bridge._recv_loop` finally block → `mark_turn_complete()` so the last
+        bridge chunk reaches the user even after a sudden remote close.
+      - `_handle_interrupt` in endpoint.py → `interrupt()` to clear pending playback
+        and notify the client.
+      - `_drain_on_close` in endpoint.py and `pipeline._abort` → `shutdown_playback()`
+        on socket teardown.
+    """
 
     def __init__(self, websocket: WebSocket) -> None:
         self._ws = websocket

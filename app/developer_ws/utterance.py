@@ -16,6 +16,18 @@ FlushCallback = Callable[[], Awaitable[None] | None]
 
 
 class UtteranceBuffer:
+    """One per voice session. Holds raw PCM bytes between flushes.
+
+    Constructed by: `developer_websocket_endpoint` in endpoint.py.
+    Mutated by:
+      - `extend(pcm)` — called from `_handle_audio` for each non-bridge frame.
+      - `snapshot_and_clear()` — called from `pipeline.flush()` at the start of a turn.
+      - `arm_timer(on_fire)` — called from `_handle_audio` when a batch has speech;
+        `on_fire` is bound to `pipeline.flush` so the timer triggers a turn.
+      - `bump_arm_id()` — called from `_drain_on_close`, `_handle_interrupt`, and
+        when `turn_complete:true` arrives, to invalidate any in-flight watcher.
+    """
+
     def __init__(self) -> None:
         self._buf = bytearray()
         # Short critical section: extend / snapshot+clear only — never held across STT/LLM/TTS.
@@ -55,26 +67,48 @@ class UtteranceBuffer:
                 pass
 
     async def arm_timer(self, on_fire: FlushCallback) -> None:
-        """After end_silence_s without re-arm, invoke on_fire once."""
+        """Schedule `on_fire` to run after `_end_silence_s` of no re-arm.
+
+        Called by: `_handle_audio` in endpoint.py, once per batch that clears the
+        VAD threshold. Each call cancels any prior watcher (so continuous speech
+        keeps deferring the fire) and bumps `_arm_id` so a stale watcher about to
+        execute can detect that it lost the race and return without firing.
+        `on_fire` is `pipeline.flush` in normal use.
+        """
+        import logging
+        _dlog = logging.getLogger("developer_ws")
         await self.cancel_timer()
         self._arm_id += 1
         my_id = self._arm_id
+        _dlog.info("timer ARMED id=%d sleep=%.2fs", my_id, self._end_silence_s)
 
         async def _watch() -> None:
             try:
                 await asyncio.sleep(self._end_silence_s)
             except asyncio.CancelledError:
+                _dlog.info("timer CANCELLED id=%d", my_id)
                 return
             # If anyone else re-armed or cancelled, stand down.
             if my_id != self._arm_id:
+                _dlog.info("timer STALE id=%d current=%d", my_id, self._arm_id)
                 return
-            result = on_fire()
-            if asyncio.iscoroutine(result):
-                await result
+            _dlog.info("timer FIRING id=%d -> on_fire()", my_id)
+            try:
+                result = on_fire()
+                if asyncio.iscoroutine(result):
+                    await result
+                _dlog.info("timer DONE id=%d", my_id)
+            except Exception:
+                _dlog.exception("timer on_fire raised id=%d", my_id)
 
         self._timer = asyncio.create_task(_watch())
 
     async def bump_arm_id(self) -> None:
-        """Invalidate any in-flight watcher without scheduling a new one."""
+        """Invalidate any in-flight watcher without scheduling a new one.
+
+        Called by: `_drain_on_close` (shutdown), `_handle_interrupt` (user said "stop"),
+        and `_handle_audio` when `turn_complete:true` arrives (we're about to flush
+        immediately, so the silence timer would be redundant).
+        """
         self._arm_id += 1
         await self.cancel_timer()

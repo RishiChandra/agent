@@ -1,4 +1,9 @@
-"""Gemini tool schemas the developer pipeline can dispatch."""
+"""OpenAI-shaped tool schemas exposed to Gemini.
+
+`ALL_TOOLS` is passed verbatim to `gemini_reply(...)`. When Gemini chooses a tool,
+the pipeline dispatches by `function.name`, matching one of the constants defined
+here (e.g. `START_REMOTE_AUDIO_BRIDGE`).
+"""
 
 from __future__ import annotations
 
@@ -12,8 +17,9 @@ START_REMOTE_AUDIO_BRIDGE_TOOL = {
             "Open a direct audio relay to a remote server. Once this returns successfully, "
             "the user's microphone audio is forwarded to that remote and the remote's audio "
             "responses are played back to the user without going through this assistant. "
-            "Call this only when the user explicitly asks to connect, hand off, or talk to "
-            "the remote/other server/operator."
+            "Call this when the user says any of: 'call the service', 'call the server', "
+            "'call the remote', 'connect to the service/remote/operator', 'dial the service', "
+            "'hand off to the remote/operator', or anything clearly equivalent in intent."
         ),
         "parameters": {
             "type": "object",

@@ -1,4 +1,9 @@
-"""pyttsx3 (offline OS) TTS for the developer WebSocket path."""
+"""Offline (pyttsx3) text-to-speech.
+
+`synthesize_speech_pcm24(text)` returns int16 mono PCM at the downlink sample rate
+(24 kHz), resampling from whatever the OS voice produces. Returned bytes are queued
+on `AudioIO` for Opus encoding and downlink delivery.
+"""
 
 from __future__ import annotations
 
@@ -62,5 +67,10 @@ def _synthesize_sync(text: str) -> bytes:
 
 
 async def synthesize_speech_pcm24(text: str) -> bytes:
-    """Synthesize speech (offloaded to thread). Returns int16 PCM at DOWNLINK_SAMPLE_RATE."""
+    """Synthesize speech and return int16 mono PCM at the downlink sample rate.
+
+    Called by: `pipeline._speak` after Gemini returns plain text, after a tool ack,
+    after a service-ping announcement, and on bridge remote-close notification.
+    Offloaded to a worker thread because pyttsx3 is blocking.
+    """
     return await asyncio.to_thread(_synthesize_sync, text)
