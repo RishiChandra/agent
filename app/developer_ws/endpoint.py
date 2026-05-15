@@ -13,6 +13,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from audio_codec import UPLINK_SAMPLE_RATE
 
 from .audio_io import AudioIO
+from .bridge import RemoteAudioBridge
 from .pipeline import SpeechPipeline
 from .scratchpad import Scratchpad
 from .utterance import UtteranceBuffer
@@ -27,10 +28,11 @@ async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> No
     audio = AudioIO(websocket)
     utterance = UtteranceBuffer()
     scratchpad = Scratchpad(user_id=user_id)
-    pipeline = SpeechPipeline(websocket, user_id, utterance, audio, scratchpad)
+    bridge = RemoteAudioBridge(audio)
+    pipeline = SpeechPipeline(websocket, user_id, utterance, audio, scratchpad, bridge)
 
     try:
-        await _receive_loop(websocket, user_id, audio, utterance, pipeline)
+        await _receive_loop(websocket, user_id, audio, utterance, pipeline, bridge)
     except WebSocketDisconnect:
         log.info("disconnected user_id=%s", user_id)
     except Exception as e:
@@ -40,7 +42,7 @@ async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> No
         except Exception:
             pass
     finally:
-        await _drain_on_close(user_id, utterance, pipeline, audio)
+        await _drain_on_close(user_id, utterance, pipeline, audio, bridge)
         scratchpad.dump()
 
 
@@ -50,6 +52,7 @@ async def _receive_loop(
     audio: AudioIO,
     utterance: UtteranceBuffer,
     pipeline: SpeechPipeline,
+    bridge: RemoteAudioBridge,
 ) -> None:
     while True:
         try:
@@ -63,14 +66,14 @@ async def _receive_loop(
         data = json.loads(msg)
 
         if _is_interrupt(data):
-            await _handle_interrupt(audio, utterance)
+            await _handle_interrupt(audio, utterance, bridge)
             continue
 
         if "audio" in data:
-            await _handle_audio(data, user_id, audio, utterance, pipeline)
+            await _handle_audio(data, user_id, audio, utterance, pipeline, bridge)
             continue
 
-        if data.get("turn_complete") is True:
+        if data.get("turn_complete") is True and not bridge.active:
             await utterance.bump_arm_id()
             pipeline.schedule_flush()
 
@@ -82,7 +85,12 @@ def _is_interrupt(data: dict) -> bool:
     return bool(text and "stop" in str(text).lower())
 
 
-async def _handle_interrupt(audio: AudioIO, utterance: UtteranceBuffer) -> None:
+async def _handle_interrupt(
+    audio: AudioIO, utterance: UtteranceBuffer, bridge: RemoteAudioBridge
+) -> None:
+    # User interrupt tears down the bridge so they regain the local assistant.
+    if bridge.active:
+        await bridge.close()
     await utterance.snapshot_and_clear()
     await utterance.bump_arm_id()
     await audio.interrupt()
@@ -94,8 +102,16 @@ async def _handle_audio(
     audio: AudioIO,
     utterance: UtteranceBuffer,
     pipeline: SpeechPipeline,
+    bridge: RemoteAudioBridge,
 ) -> None:
     pcm = _decode_audio_payload(data, user_id, audio)
+
+    # Bridge mode: skip local STT/LLM/TTS entirely; relay raw uplink to the remote.
+    if bridge.active:
+        if pcm:
+            await bridge.send_uplink_pcm(pcm)
+        return
+
     if pcm:
         await utterance.extend(pcm)
 
@@ -129,8 +145,10 @@ async def _drain_on_close(
     utterance: UtteranceBuffer,
     pipeline: SpeechPipeline,
     audio: AudioIO,
+    bridge: RemoteAudioBridge,
 ) -> None:
     await utterance.bump_arm_id()
+    await bridge.close()
     try:
         if await utterance.has_data():
             # Bound the final flush so a stuck STT/LLM/TTS can't hold the connection open.

@@ -12,13 +12,18 @@ from starlette.websockets import WebSocketState
 from audio_codec import UPLINK_SAMPLE_RATE, rms_int16_le
 
 from .audio_io import AudioIO
-from .llm import gemini_reply
+from .bridge import REMOTE_BRIDGE_URL, RemoteAudioBridge
+from .llm import GeminiReply, gemini_reply
 from .scratchpad import Scratchpad
 from .stt import transcribe_pcm16
+from .tools import ALL_TOOLS, START_REMOTE_AUDIO_BRIDGE
 from .tts import synthesize_speech_pcm24
 from .utterance import UtteranceBuffer
 
 log = logging.getLogger("developer_ws")
+
+_BRIDGE_ACK = "Connecting you to the remote server now."
+_BRIDGE_FAIL = "Sorry, I couldn't open the remote connection."
 
 
 class SpeechPipeline:
@@ -29,12 +34,14 @@ class SpeechPipeline:
         utterance: UtteranceBuffer,
         audio: AudioIO,
         scratchpad: Scratchpad,
+        bridge: RemoteAudioBridge,
     ) -> None:
         self._ws = websocket
         self._user_id = user_id
         self._utterance = utterance
         self._audio = audio
         self._scratchpad = scratchpad
+        self._bridge = bridge
         # At most one STT→LLM→TTS turn at a time; new flushes wait their turn.
         self._lock = asyncio.Lock()
         self._min_rms = float(os.environ.get("DEVELOPER_WS_MIN_INPUT_RMS", "20"))
@@ -84,23 +91,53 @@ class SpeechPipeline:
                 await self._abort("STT")
                 return
 
-            reply = await gemini_reply(text, history=history)
+            reply = await gemini_reply(text, history=history, tools=ALL_TOOLS)
             log.info("user_id=%s gemini_reply=%r", self._user_id, reply)
-            if not reply.strip():
+
+            if reply.tool_call is not None:
+                await self._handle_tool_call(reply)
+                return
+
+            if not reply.text.strip():
                 self._audio.mark_turn_complete()
                 return
-            self._scratchpad.add_assistant(reply)
+            self._scratchpad.add_assistant(reply.text)
             if not self._alive():
                 await self._abort("Gemini")
                 return
 
-            pcm24 = await synthesize_speech_pcm24(reply)
-            if not self._alive():
-                await self._abort("TTS synth")
-                return
-            if pcm24:
-                self._audio.add_playback_pcm(pcm24)
+            await self._speak(reply.text)
+
+    async def _handle_tool_call(self, reply: GeminiReply) -> None:
+        """Dispatch a Gemini tool call. Currently only start_remote_audio_bridge."""
+        assert reply.tool_call is not None
+        name = reply.tool_call.name
+        if name != START_REMOTE_AUDIO_BRIDGE:
+            log.warning("unknown tool call name=%s; ignoring", name)
             self._audio.mark_turn_complete()
+            return
+
+        log.info(
+            "user_id=%s tool=%s args=%s",
+            self._user_id, name, reply.tool_call.arguments,
+        )
+        ok = await self._bridge.start(REMOTE_BRIDGE_URL)
+        ack = _BRIDGE_ACK if ok else _BRIDGE_FAIL
+        self._scratchpad.add_assistant(f"[tool:{name}] {ack}")
+        if not self._alive():
+            await self._abort("tool")
+            return
+        await self._speak(ack)
+
+    async def _speak(self, text: str) -> None:
+        """Synthesize and queue TTS; close out the turn."""
+        pcm24 = await synthesize_speech_pcm24(text)
+        if not self._alive():
+            await self._abort("TTS synth")
+            return
+        if pcm24:
+            self._audio.add_playback_pcm(pcm24)
+        self._audio.mark_turn_complete()
 
     def schedule_flush(self) -> None:
         """Fire-and-forget flush so callers (silence timer, msg handler) stay non-blocking."""
