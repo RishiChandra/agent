@@ -1,4 +1,10 @@
-"""Vosk STT for the developer WebSocket path."""
+"""Vosk speech-to-text.
+
+`preload_vosk_model()` is called from main's lifespan startup so the first STT call
+doesn't pay the 5-10s cold-load tax. `transcribe_pcm16(pcm, sr)` accepts int16 mono PCM
+at the given sample rate and returns the recognized text (empty string on no-speech).
+Model path is read from `VOSK_MODEL_PATH` in the environment.
+"""
 
 from __future__ import annotations
 
@@ -38,7 +44,11 @@ def _load_model_sync():
 
 
 async def preload_vosk_model() -> None:
-    """Warm the model cache during FastAPI startup so first STT call avoids cold-load latency."""
+    """Warm the model cache during FastAPI startup so the first STT call doesn't stall.
+
+    Called by: `lifespan()` in `app/main.py`. Safe to no-op (logs a warning) if the
+    model path is unset/missing — STT will then return empty strings.
+    """
     await asyncio.to_thread(_load_model_sync)
 
 
@@ -80,5 +90,8 @@ def _transcribe_sync(pcm: bytes, sample_rate: int) -> str:
 
 
 async def transcribe_pcm16(pcm: bytes, sample_rate: int) -> str:
-    """Transcribe mono int16 PCM (offloaded to thread)."""
+    """Transcribe mono int16 PCM. Offloaded to a worker thread.
+
+    Called by: `pipeline.flush` once per utterance. Returns "" on no-speech.
+    """
     return await asyncio.to_thread(_transcribe_sync, pcm, sample_rate)

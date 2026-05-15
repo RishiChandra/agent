@@ -1,10 +1,18 @@
-"""Single-turn Gemini text reply for the developer WebSocket path."""
+"""Single-turn Gemini reply, returned as plain text or a structured tool call.
+
+`gemini_reply(transcript, history, tools)` is sync-by-thread (wrapped in `to_thread`)
+so it doesn't block the event loop. The default system prompt teaches Gemini how to
+infer bridge state from scratchpad history and when to call `start_remote_audio_bridge`;
+override it with `DEVELOPER_GEMINI_SYSTEM_INSTRUCTION`.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
@@ -15,14 +23,54 @@ log = logging.getLogger("developer_ws")
 _DEFAULT_SYSTEM = (
     "You are a helpful assistant. The user's message below was transcribed from their speech. "
     "Reply briefly and clearly, as if you are speaking aloud to them. "
-    "Do not prefix with 'The user said' unless necessary."
+    "Do not prefix with 'The user said' unless necessary. "
+    "\n\n"
+    "Tool use — start_remote_audio_bridge: "
+    "Call this tool only if the user asks to call/connect to the service, dial the remote, "
+    "hand off to the remote server/operator, or says anything along the lines of 'call the "
+    "service'. "
+    "Bridge state is reflected in the conversation history: an assistant turn like "
+    "'Connecting you to the remote service now.' means the bridge was opened, and a later "
+    "turn like 'The remote service disconnected.' means it has since closed. If the most "
+    "recent of those two is the open one, the bridge is currently OPEN — do not call the "
+    "tool again unless the user explicitly asks to reconnect; instead acknowledge that "
+    "they're already connected. If the most recent is the disconnect (or neither has been "
+    "said), the bridge is currently CLOSED. "
+    "Otherwise reply with plain text."
 )
 
 
-def _reply_sync(transcript: str, history: list[dict] | None) -> str:
+@dataclass
+class ToolCall:
+    name: str
+    arguments: dict
+
+
+@dataclass
+class GeminiReply:
+    """Either text or tool_call is populated (never both meaningful)."""
+    text: str = ""
+    tool_call: ToolCall | None = None
+
+
+def _parse_tool_call(tc) -> ToolCall | None:
+    name = getattr(tc.function, "name", None)
+    if not name:
+        return None
+    raw = getattr(tc.function, "arguments", "") or "{}"
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    return ToolCall(name=name, arguments=args)
+
+
+def _reply_sync(
+    transcript: str, history: list[dict] | None, tools: list[dict] | None
+) -> GeminiReply:
     text = (transcript or "").strip()
     if not text:
-        return ""
+        return GeminiReply()
     from agents.gemini_client import call_gemini, gemini_response_to_openai_like
 
     system = (
@@ -35,14 +83,29 @@ def _reply_sync(transcript: str, history: list[dict] | None) -> str:
         messages.extend(history)
     messages.append({"role": "user", "content": text})
     try:
-        response = call_gemini(messages, tools=None)
+        # tool_choice="auto" lets Gemini decide between a tool call and a plain reply.
+        response = call_gemini(messages, tools=tools, tool_choice="auto")
     except Exception as e:
         log.warning("Gemini generateContent failed: %s", e)
-        return ""
+        return GeminiReply()
     wrapped = gemini_response_to_openai_like(response)
-    return (wrapped.choices[0].message.content or "").strip()
+    msg = wrapped.choices[0].message
+    if msg.tool_calls:
+        parsed = _parse_tool_call(msg.tool_calls[0])
+        if parsed is not None:
+            return GeminiReply(tool_call=parsed)
+    return GeminiReply(text=(msg.content or "").strip())
 
 
-async def gemini_reply(transcript: str, history: list[dict] | None = None) -> str:
-    """Run one text turn through Gemini with optional prior conversation context."""
-    return await asyncio.to_thread(_reply_sync, transcript, history)
+async def gemini_reply(
+    transcript: str,
+    history: list[dict] | None = None,
+    tools: list[dict] | None = None,
+) -> GeminiReply:
+    """Run one text turn through Gemini. Returns either text or a tool call.
+
+    Called by: `pipeline.flush` after STT, with `history` from
+    `scratchpad.history_messages()` and `tools` from `tools.ALL_TOOLS`.
+    Offloaded to a worker thread because the underlying SDK call is blocking.
+    """
+    return await asyncio.to_thread(_reply_sync, transcript, history, tools)

@@ -57,13 +57,21 @@ def _openai_tools_to_gemini(tools):
     return gemini_tools if gemini_tools else None
 
 
-def call_gemini(messages, tools=None):
+_FUNCTION_CALLING_MODES = {
+    "auto": types.FunctionCallingConfigMode.AUTO,
+    "any": types.FunctionCallingConfigMode.ANY,
+    "none": types.FunctionCallingConfigMode.NONE,
+}
+
+
+def call_gemini(messages, tools=None, tool_choice="any"):
     """
     Call Gemini (text generateContent) with the given messages and optional tools.
 
     Args:
         messages: List of dicts with "role" ("system"|"user"|"assistant") and "content".
         tools: Optional list of OpenAI-style tool definitions (type/function/parameters).
+        tool_choice: "any" (force a tool call — legacy default), "auto" (model decides), or "none".
 
     Returns:
         GenerateContentResponse from the Gemini API.
@@ -80,8 +88,9 @@ def call_gemini(messages, tools=None):
         config_kw["system_instruction"] = system_instruction
     gemini_tools = _openai_tools_to_gemini(tools)
     if gemini_tools:
+        mode = _FUNCTION_CALLING_MODES.get(tool_choice, types.FunctionCallingConfigMode.ANY)
         config_kw["tools"] = gemini_tools
-        config_kw["tool_config"] = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode=types.FunctionCallingConfigMode.ANY))  # type: ignore
+        config_kw["tool_config"] = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode=mode))  # type: ignore
 
     config = types.GenerateContentConfig(**config_kw) if config_kw else None
     if config:

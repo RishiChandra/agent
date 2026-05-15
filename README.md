@@ -45,6 +45,11 @@ To test (local vs deployed can be configured in the test), run ```python test/ap
 
 Run ```python -m app.test_proactive_messaging``` from the test directory too to make sure that proactive messaging works
 
+### developer_ws bridge end-to-end test
+Default brings up main, the mic client, and the echo relay (each in its own console) without auto-pinging — say "call the service" to open the bridge: ```python app/developer_ws/testing/run_full_test.py --no-ping``` (drop ```--no-ping``` to have the echo server auto-call main on startup).
+To run manually instead: ```python app/main.py```, then ```python test/app/developer/test_developer_ws.py```, then (from `app/`) ```python developer_ws/testing/echo_server.py``` (append ```--ping <user_id>``` for the auto-call variant).
+See ```app/developer_ws/DESIGN.md``` and ```BRIDGE_PROTOCOL.md``` for architecture and wire protocol.
+
 Instructions for deploying the app to Azure:
 Mac Instructions:
 Run ```bash azure-deploy-simple.sh ``` to deploy container
