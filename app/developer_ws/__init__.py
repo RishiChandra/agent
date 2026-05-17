@@ -5,6 +5,7 @@ When Gemini calls `start_remote_audio_bridge`, frames are relayed verbatim to a 
 WebSocket service instead of going through STT/LLM/TTS. See DESIGN.md and BRIDGE_PROTOCOL.md.
 """
 
+from . import service_registry
 from .audio_io import AudioIO
 from .endpoint import developer_websocket_endpoint
 from .stt import preload_vosk_model
@@ -15,4 +16,5 @@ __all__ = [
     "developer_websocket_endpoint",
     "preload_vosk_model",
     "preload_piper_voice",
+    "service_registry",
 ]

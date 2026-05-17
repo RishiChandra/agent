@@ -193,20 +193,30 @@ class SpeechPipeline:
             return
         await self._speak(ack)
 
-    async def on_service_ping(self, service_id: str = "") -> bool:
+    async def on_service_ping(
+        self, service_id: str = "", public_url: str | None = None,
+    ) -> bool:
         """Service-initiated call: announce to the user, then dial the bridge.
 
         Called by: `developer_ping` HTTP handler in `app/main.py` after
-        `registry.get(user_id)` returns this pipeline.
+        `registry.get(user_id)` returns this pipeline. `public_url` is the URL
+        the orchestrator just resolved out of `service_registry.get(service_id)`
+        — when provided, the bridge dials it instead of the legacy
+        `DEVELOPER_WS_REMOTE_BRIDGE_URL` env var. `public_url` may be None for
+        back-compat with callers that did not register a service_id, in which
+        case we fall back to the env-driven default.
         Calls: `_speak(announce)` → `bridge.start(...)` → either `_speak(fail)` or
         a scratchpad ack. Compares `service_id` from the ping body against
         `result.service_id` from the WS ack; logs a warning on mismatch.
         Takes `self._lock` so the announcement can't talk over an in-flight user turn.
         Returns True if the bridge is open (newly or already) when we exit.
         """
+        dial_url = public_url or REMOTE_BRIDGE_URL
         log.info(
-            "user_id=%s service ping received service_id=%s",
-            self._user_id, service_id or "unknown",
+            "user_id=%s service ping received service_id=%s dial_url=%s "
+            "(source=%s)",
+            self._user_id, service_id or "unknown", dial_url,
+            "registry" if public_url else "env-fallback",
         )
         if self._bridge.active:
             log.info("user_id=%s bridge already active; ignoring ping", self._user_id)
@@ -221,7 +231,7 @@ class SpeechPipeline:
             if not self._alive():
                 return False
             await self._speak(_SERVICE_PING_ANNOUNCE)
-            result = await self._bridge.start(REMOTE_BRIDGE_URL)
+            result = await self._bridge.start(dial_url)
             log.info(
                 "user_id=%s ping->bridge result ok=%s outcome=%s detail=%r service_id=%s",
                 self._user_id, result.ok, result.outcome, result.detail,
