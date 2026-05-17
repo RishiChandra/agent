@@ -50,14 +50,10 @@ Default brings up main, the mic client, and the echo relay (each in its own cons
 To run manually instead: ```python app/main.py```, then ```python test/app/developer/test_developer_ws.py```, then (from `app/`) ```python developer_ws/testing/echo_server.py``` (append ```--ping <user_id>``` for the auto-call variant).
 See ```app/developer_ws/DESIGN.md``` and ```BRIDGE_PROTOCOL.md``` for architecture and wire protocol.
 
-Instructions for deploying the app to Azure:
-Mac Instructions:
-Run ```bash azure-deploy-simple.sh ``` to deploy container
-
-Windows Instructions:
-Ensure you have git bash. All instructions will be assuming you are in bash.
-Ensure you have docker desktop running. Try ```docker ps``` and see that it prints a table (empty is fine)
-Run ```bash azure-deploy-simple.sh``` to deploy container
+Instructions for deploying the app to Azure (App Service zip deploy — no Docker required):
+Prereqs: Azure CLI installed and ```az login``` completed, ```zip``` on PATH, the Vosk model unpacked at repo root as ```vosk-model-small-en-us-0.15/```, and a ```.env``` populated with the secrets the script pushes as App Settings.
+Mac: Run ```bash azure-deploy.sh``` from the repo root.
+Windows: Open Git Bash and run ```bash azure-deploy.sh``` from the repo root.
 
 ## Git Rules
 Create a new branch: ```git checkout -b <name>```
