@@ -2,27 +2,54 @@
 
 ## Initial Setup
 Clone the repo to whatever IDE you choose. Cursor AI is suggested.
-Create a top level .env file. The contents can be copy pasted from the internal doc (ask Rishi)
+Create a top level ```.env``` file. Contents can be copy-pasted from the internal doc (ask Rishi).
 
-## Create Virtual Environments
-All folders (features for lack of a better term) in the root repo should have their own venv.
-Ideally, all development is done in the venv and scoped into the particular feature that is being worked on.
+## Local Setup
 
-```python -m venv .venv``` if python is not installed, can use py (windows only)
+This project needs a Python venv plus three binary assets that are **gitignored** (Vosk STT model, Piper TTS voice, Opus native lib on Windows). Pip alone won't get you a working stack — do all five steps below.
 
-Start up the venv with ```. \.venv\Scripts\Activate.ps1```
-Or ```.\.venv\Scripts\activate.bat``` for Bash
+### 1. Python venv + deps
 
-If this is first time using the venv run:
-```pip install -r requirements.txt``` for python reqs.
+Each top-level "feature" folder has its own venv. Set up both the **root** venv and the **test** venv (```test/.venv```).
 
-Deactivate with...```deactivate```
+```powershell
+# Root
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 
-Remember to set a venv in both the test folder and the root folder. Additionally a .env file
+# Test
+python -m venv test\.venv
+.\test\.venv\Scripts\Activate.ps1
+pip install -r test\requirements.txt
+deactivate
+```
 
-### Windows: Opus native library (for `opuslib` / realtime audio)
+Bash equivalent: ```. .venv/Scripts/activate``` (Git Bash on Windows) or ```source .venv/bin/activate``` (macOS/Linux).
 
-The `opuslib` package is only a Python binding. It loads the **native Opus DLL** (`opus.dll`). The `pip install` step installs `opuslib` but **does not** install that DLL.
+### 2. Vosk STT model (~68 MB, gitignored)
+
+```bash
+curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+python -c "import zipfile; zipfile.ZipFile('vosk-model.zip').extractall('.')"
+rm vosk-model.zip
+```
+
+Sanity check: ```vosk-model-small-en-us-0.15/am/final.mdl``` must exist.
+
+### 3. Piper TTS voice (~60 MB, gitignored)
+
+Cross-platform neural TTS. Same ```.onnx``` voice file is used by the local server **and** the deployed server, so both sound identical.
+
+```bash
+mkdir -p piper_voices
+curl -L -o piper_voices/en_US-amy-medium.onnx       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx
+curl -L -o piper_voices/en_US-amy-medium.onnx.json  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
+```
+
+### 4. Windows: install Opus native library
+
+```opuslib``` is a Python binding that loads the native ```opus.dll```. Pip does not install the DLL.
 
 Root venv:
 
@@ -30,13 +57,19 @@ Root venv:
 .\.venv\Scripts\python.exe scripts\install_opus_windows.py
 ```
 
-Separate **test** venv (only if you use `test\.venv`):
+Test venv (only if you have ```test\.venv```):
 
 ```powershell
 .\test\.venv\Scripts\python.exe scripts\install_opus_windows.py
 ```
 
-## Agent Developmet
+macOS/Linux: install via your package manager (```brew install opus``` / ```apt-get install libopus0```). No extra script needed.
+
+### 5. ```.env``` at repo root
+
+Pulled from the internal doc — ask Rishi. Contains ```AZURE_OPENAI_*```, ```DB_*```, ```GOOGLE_API_KEY```, ```AZURE_SERVICEBUS_CONNECTION_STRING```, etc.
+
+## Agent Development
 The Agent logic lives in the app dir. *This should eventually be renamed*
 
 To run a local websocket server, run ```python app/main.py```
@@ -50,10 +83,81 @@ Default brings up main, the mic client, and the echo relay (each in its own cons
 To run manually instead: ```python app/main.py```, then ```python test/app/developer/test_developer_ws.py```, then (from `app/`) ```python developer_ws/testing/echo_server.py``` (append ```--ping <user_id>``` for the auto-call variant).
 See ```app/developer_ws/DESIGN.md``` and ```BRIDGE_PROTOCOL.md``` for architecture and wire protocol.
 
-Instructions for deploying the app to Azure (App Service zip deploy — no Docker required):
-Prereqs: Azure CLI installed and ```az login``` completed, ```zip``` on PATH, the Vosk model unpacked at repo root as ```vosk-model-small-en-us-0.15/```, and a ```.env``` populated with the secrets the script pushes as App Settings.
-Mac: Run ```bash azure-deploy.sh``` from the repo root.
-Windows: Open Git Bash and run ```bash azure-deploy.sh``` from the repo root.
+## Deploy to Azure App Service
+
+Zip deploy, no Docker. Done by ```azure-deploy.sh```. Target: ```ai-pin``` resource group, ```websocket-ai-pin``` Linux App Service (Python 3.12, B1).
+
+### Prereqs
+
+- Azure CLI installed and ```az login``` complete (refresh token expires after 90d — re-login if you get ```AADSTS700082```).
+- Python 3.12 venv active. Script invokes ```$PYTHON_BIN``` to build the zip via ```zipfile``` stdlib.
+- ```.env``` populated. ```azure-deploy.sh``` reads ```.env``` and pushes the values as App Settings.
+- Local Vosk model + Piper voice exist (steps 2–3 above). Preflight checks for ```vosk-model-small-en-us-0.15/am/final.mdl``` and ```piper_voices/en_US-amy-medium.onnx```.
+- **Windows**: run via **Git Bash**, not WSL stub. PowerShell ```bash azure-deploy.sh``` defaults to WSL on Windows — use ```& "C:\Program Files\Git\bin\bash.exe" azure-deploy.sh``` instead, or open Git Bash directly.
+
+### One-time bootstrap: upload heavy assets to ```/home/data/```
+
+Vosk model + Piper voice live on App Service's persistent ```/home``` volume — not in every deploy zip. Upload them **once** so future deploys ship just app code (~MB, not ~100 MB):
+
+```bash
+# Build a bundle of both data dirs
+python -c "
+import zipfile, os
+EXCLUDE = {'__pycache__', '.pytest_cache'}
+def walk(zf, root):
+    for r, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE]
+        for f in files:
+            if f.endswith('.pyc'): continue
+            p = os.path.join(r, f)
+            zf.write(p, arcname=p.replace(os.sep, '/'))
+with zipfile.ZipFile('data-bundle.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
+    walk(zf, 'vosk-model-small-en-us-0.15')
+    walk(zf, 'piper_voices')
+"
+
+# Upload + extract to /home/data via Kudu (uses ARM bearer auth — no publishing creds)
+TOKEN=$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/zip" \
+     --data-binary "@data-bundle.zip" \
+     "https://websocket-ai-pin-fbbrhfawfkb7ecf3.scm.westus2-01.azurewebsites.net/api/zip/data/"
+rm data-bundle.zip
+```
+
+This step only repeats when the Vosk model or Piper voice file changes.
+
+### Deploy
+
+```bash
+# Git Bash (Windows) or any bash (macOS/Linux)
+bash azure-deploy.sh
+```
+
+What it does:
+
+1. Pushes app settings from ```.env``` (```VOSK_MODEL_PATH=/home/data/...```, ```PIPER_MODEL_PATH=/home/data/...```, secrets).
+2. Sets the startup file: ```bash -c "apt-get update -qq && apt-get install -y -qq libopus0 && cd app && python -m uvicorn main:app --host 0.0.0.0 --port 8000 --ws websockets"``` — installs libopus on every cold start.
+3. Builds a slim zip (app code + ```requirements.txt```, no data assets).
+4. Pushes the zip via ```az webapp deploy```. Oryx repacks into ```output.tar.zst``` and extracts at runtime.
+5. Polls deployment status for up to 15 min, then prints URLs.
+
+### URLs
+
+- App:    ```https://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net```
+- WS:     ```wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws```
+- Health: ```/healthz```
+
+### Viewing logs
+
+```bash
+# Live tail (Ctrl+C to stop)
+az webapp log tail --name websocket-ai-pin --resource-group ai-pin
+
+# Or via Kudu in a browser
+# https://websocket-ai-pin-fbbrhfawfkb7ecf3.scm.westus2-01.azurewebsites.net/newui/fileManager → /home/LogFiles/
+```
+
+If logging stops working: ```az webapp log config --name websocket-ai-pin --resource-group ai-pin --application-logging filesystem --level information --docker-container-logging filesystem```.
 
 ## Git Rules
 Create a new branch: ```git checkout -b <name>```

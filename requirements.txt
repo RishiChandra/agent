@@ -20,7 +20,7 @@ google-genai>=1.70.0
 
 # Developer WebSocket offline STT/TTS (optional if you only use /ws/)
 vosk
-pyttsx3
+piper-tts
 
 # Azure (device SDK has wheels; service SDK optional, see below)
 azure-servicebus
