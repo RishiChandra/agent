@@ -7,12 +7,14 @@ WebSocket service instead of going through STT/LLM/TTS. See DESIGN.md and BRIDGE
 
 from .audio_io import AudioIO
 from .endpoint import developer_websocket_endpoint
+from .routes import router as http_router
 from .stt import preload_vosk_model
 from .tts import preload_piper_voice
 
 __all__ = [
     "AudioIO",
     "developer_websocket_endpoint",
+    "http_router",
     "preload_vosk_model",
     "preload_piper_voice",
 ]

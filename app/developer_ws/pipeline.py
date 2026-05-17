@@ -35,12 +35,28 @@ from .utterance import UtteranceBuffer
 
 log = logging.getLogger("developer_ws")
 
-_BRIDGE_ACK = "Connecting you to the remote service now."
-_BRIDGE_FAIL_GENERIC = "Sorry, I couldn't open the remote connection."
-_BRIDGE_FAIL_NO_PICKUP = "The remote service didn't pick up."
-_BRIDGE_FAIL_REJECTED = "The remote service declined the call."
-_BRIDGE_DISCONNECT = "The remote service disconnected. You're back with me now."
-_SERVICE_PING_ANNOUNCE = "Your service wants to speak with you. Connecting you now."
+_BRIDGE_ACK_GENERIC = "Connecting you now."
+_BRIDGE_FAIL_GENERIC = "Sorry, I couldn't open the connection."
+_BRIDGE_FAIL_NO_PICKUP = "The agent didn't pick up."
+_BRIDGE_FAIL_REJECTED = "The agent declined the call."
+_BRIDGE_FAIL_UNKNOWN_AGENT = "I couldn't find that agent in your list."
+_BRIDGE_FAIL_MISSING_URL = "That agent doesn't have a URL configured."
+_BRIDGE_DISCONNECT = "The agent disconnected. You're back with me now."
+_SERVICE_PING_ANNOUNCE = "An agent wants to speak with you. Connecting you now."
+
+
+def _agent_label(agent: dict | None) -> str:
+    if not agent:
+        return "the agent"
+    for key in ("name", "display_name", "agent_name", "title", "agent_id"):
+        val = agent.get(key)
+        if val:
+            return str(val)
+    return "the agent"
+
+
+def _bridge_ack(agent: dict | None) -> str:
+    return f"Connecting you to {_agent_label(agent)} now."
 
 
 def _fail_message(result: BridgeStartResult) -> str:
@@ -74,6 +90,8 @@ class SpeechPipeline:
         audio: AudioIO,
         scratchpad: Scratchpad,
         bridge: RemoteAudioBridge,
+        agent_context: str = "",
+        agents: list[dict] | None = None,
     ) -> None:
         self._ws = websocket
         self._user_id = user_id
@@ -81,6 +99,12 @@ class SpeechPipeline:
         self._audio = audio
         self._scratchpad = scratchpad
         self._bridge = bridge
+        self._agent_context = agent_context
+        self._agents_by_id: dict[str, dict] = {
+            str(a["agent_id"]): a
+            for a in (agents or [])
+            if a.get("agent_id") is not None
+        }
         # At most one STT→LLM→TTS turn at a time; new flushes wait their turn.
         self._lock = asyncio.Lock()
         self._min_rms = float(os.environ.get("DEVELOPER_WS_MIN_INPUT_RMS", "20"))
@@ -146,7 +170,12 @@ class SpeechPipeline:
                 await self._abort("STT")
                 return
 
-            reply = await gemini_reply(text, history=history, tools=ALL_TOOLS)
+            reply = await gemini_reply(
+                text,
+                history=history,
+                tools=ALL_TOOLS,
+                agent_context=self._agent_context or None,
+            )
             log.info("user_id=%s gemini_reply=%r", self._user_id, reply)
 
             if reply.tool_call is not None:
@@ -167,8 +196,9 @@ class SpeechPipeline:
         """Dispatch a Gemini tool call. Currently only `start_remote_audio_bridge`.
 
         Called by: `flush()` when `reply.tool_call` is set.
-        Calls: `bridge.start(...)` → `_speak(ack)`. The ack text is chosen by
-        `_fail_message(result)` for failures, or the bridge-open string for success.
+        Looks up the target agent_url from this session's cached agents map, dials it,
+        and speaks an agent-named ack. Refuses unknown agent_ids with a spoken error
+        instead of dialing a wrong/default URL.
         """
         assert reply.tool_call is not None
         name = reply.tool_call.name
@@ -177,16 +207,40 @@ class SpeechPipeline:
             self._audio.mark_turn_complete()
             return
 
+        args = reply.tool_call.arguments or {}
+        agent_id = str(args.get("agent_id", "")).strip()
         log.info(
-            "user_id=%s tool=%s args=%s",
-            self._user_id, name, reply.tool_call.arguments,
+            "user_id=%s tool=%s args=%s", self._user_id, name, args,
         )
-        result = await self._bridge.start(REMOTE_BRIDGE_URL)
+
+        agent = self._agents_by_id.get(agent_id)
+        if agent is None:
+            log.warning(
+                "user_id=%s tool refused: unknown agent_id=%r (known=%s)",
+                self._user_id, agent_id, list(self._agents_by_id.keys()),
+            )
+            self._scratchpad.add_assistant(_BRIDGE_FAIL_UNKNOWN_AGENT)
+            if self._alive():
+                await self._speak(_BRIDGE_FAIL_UNKNOWN_AGENT)
+            return
+
+        agent_url = str(agent.get("agent_url") or "").strip()
+        if not agent_url:
+            log.warning(
+                "user_id=%s tool refused: agent_id=%s has no agent_url",
+                self._user_id, agent_id,
+            )
+            self._scratchpad.add_assistant(_BRIDGE_FAIL_MISSING_URL)
+            if self._alive():
+                await self._speak(_BRIDGE_FAIL_MISSING_URL)
+            return
+
+        result = await self._bridge.start(agent_url)
         log.info(
-            "user_id=%s bridge start result ok=%s outcome=%s detail=%r",
-            self._user_id, result.ok, result.outcome, result.detail,
+            "user_id=%s bridge start result agent_id=%s url=%s ok=%s outcome=%s detail=%r",
+            self._user_id, agent_id, agent_url, result.ok, result.outcome, result.detail,
         )
-        ack = _BRIDGE_ACK if result.ok else _fail_message(result)
+        ack = _bridge_ack(agent) if result.ok else _fail_message(result)
         self._scratchpad.add_assistant(ack)
         if not self._alive():
             await self._abort("tool")
@@ -239,7 +293,7 @@ class SpeechPipeline:
                     self._user_id, service_id, result.service_id,
                 )
             if result.ok:
-                self._scratchpad.add_assistant(_BRIDGE_ACK)
+                self._scratchpad.add_assistant(_BRIDGE_ACK_GENERIC)
                 return True
             fail = _fail_message(result)
             self._scratchpad.add_assistant(fail)

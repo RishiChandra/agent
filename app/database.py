@@ -137,10 +137,10 @@ def update_task_enqueue_sequence_id(task_id: str, sequence_id) -> int:
 def get_user_by_id(user_id: str) -> dict:
     """
     Get full user profile by user_id.
-    
+
     Args:
         user_id: The user ID to fetch
-        
+
     Returns:
         Dictionary with user profile data, or None if not found
     """
@@ -150,8 +150,9 @@ def get_user_by_id(user_id: str) -> dict:
         WHERE user_id = %s
     """
     results = execute_query(query, (user_id,))
-    
+
     if results and len(results) > 0:
         return results[0]
-    
+
     return None
+

@@ -38,6 +38,11 @@ log = logging.getLogger("echo_server")
 UPLINK_SR = 16000
 DOWNLINK_SR = 24000
 
+# Slice each resampled downlink chunk into small frames so the bridge pumps audio
+# to the user with minimal pacing latency. 60 ms @ 24 kHz mono int16 = 2880 bytes.
+ECHO_SLICE_MS = int(os.environ.get("ECHO_SLICE_MS", "60"))
+ECHO_SLICE_BYTES = DOWNLINK_SR * ECHO_SLICE_MS // 1000 * 2
+
 PROTOCOL_VERSION = "1"
 # A per-process identifier so each run is distinguishable in main's logs.
 # Override via --service-id or ECHO_SERVICE_ID.
@@ -202,20 +207,30 @@ async def relay(websocket: WebSocket) -> None:
             out_pcm, resample_state = audioop.ratecv(
                 pcm, 2, 1, in_sr, DOWNLINK_SR, resample_state
             )
+            # Split into small slices so the bridge sees frequent downlink frames
+            # instead of one big 1.5s blob — keeps server-side coalescing cheap
+            # and lets audio start playing sooner.
             try:
-                await websocket.send_text(
-                    json.dumps({
-                        "audio": base64.b64encode(out_pcm).decode("utf-8"),
-                        "sr": DOWNLINK_SR,
-                    })
-                )
-                frames_out += 1
+                send_failed = False
+                for i in range(0, len(out_pcm), ECHO_SLICE_BYTES):
+                    slice_pcm = out_pcm[i : i + ECHO_SLICE_BYTES]
+                    if not slice_pcm:
+                        continue
+                    await websocket.send_text(
+                        json.dumps({
+                            "audio": base64.b64encode(slice_pcm).decode("utf-8"),
+                            "sr": DOWNLINK_SR,
+                        })
+                    )
+                    frames_out += 1
             except Exception as e:
+                send_failed = True
                 disconnect_reason = f"send_error: {e}"
                 log.warning(
                     "echo: send failed peer=%s user_id=%s err=%s (in=%d out=%d)",
                     peer, user_id, e, frames_in, frames_out,
                 )
+            if send_failed:
                 break
     except WebSocketDisconnect as e:
         disconnect_reason = f"client_closed code={getattr(e, 'code', '?')}"

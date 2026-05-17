@@ -25,17 +25,22 @@ _DEFAULT_SYSTEM = (
     "Reply briefly and clearly, as if you are speaking aloud to them. "
     "Do not prefix with 'The user said' unless necessary. "
     "\n\n"
-    "Tool use — start_remote_audio_bridge: "
-    "Call this tool only if the user asks to call/connect to the service, dial the remote, "
-    "hand off to the remote server/operator, or says anything along the lines of 'call the "
-    "service'. "
+    "Routing to agents — start_remote_audio_bridge: "
+    "The system prompt below contains the user's registered agents (agent_id, name, "
+    "agent_url, and other agent_info). When the user asks to speak with, call, connect to, "
+    "or hand off to an agent or service, pick the best-matching agent_id from that list and "
+    "call the start_remote_audio_bridge tool with it. If the user asks for an agent by name "
+    "or capability that doesn't match anything in the list, do NOT call the tool — instead "
+    "tell them which agents they have available and ask which one they want. If the user "
+    "has no registered agents, say so and don't call the tool. "
+    "\n\n"
     "Bridge state is reflected in the conversation history: an assistant turn like "
-    "'Connecting you to the remote service now.' means the bridge was opened, and a later "
-    "turn like 'The remote service disconnected.' means it has since closed. If the most "
-    "recent of those two is the open one, the bridge is currently OPEN — do not call the "
-    "tool again unless the user explicitly asks to reconnect; instead acknowledge that "
-    "they're already connected. If the most recent is the disconnect (or neither has been "
-    "said), the bridge is currently CLOSED. "
+    "'Connecting you to <agent> now.' means the bridge was opened, and a later turn like "
+    "'<agent> disconnected.' means it has since closed. If the most recent of those two is "
+    "the open one, the bridge is currently OPEN — do not call the tool again unless the "
+    "user explicitly asks to reconnect or switch agents; instead acknowledge that they're "
+    "already connected. If the most recent is the disconnect (or neither has been said), "
+    "the bridge is currently CLOSED. "
     "Otherwise reply with plain text."
 )
 
@@ -66,7 +71,10 @@ def _parse_tool_call(tc) -> ToolCall | None:
 
 
 def _reply_sync(
-    transcript: str, history: list[dict] | None, tools: list[dict] | None
+    transcript: str,
+    history: list[dict] | None,
+    tools: list[dict] | None,
+    agent_context: str | None = None,
 ) -> GeminiReply:
     text = (transcript or "").strip()
     if not text:
@@ -77,6 +85,8 @@ def _reply_sync(
         os.environ.get("DEVELOPER_GEMINI_SYSTEM_INSTRUCTION", "").strip()
         or _DEFAULT_SYSTEM
     )
+    if agent_context:
+        system = f"{system}\n\n{agent_context}"
     # System first, then prior turns (oldest → newest), then the new user transcript.
     messages: list[dict] = [{"role": "system", "content": system}]
     if history:
@@ -101,11 +111,16 @@ async def gemini_reply(
     transcript: str,
     history: list[dict] | None = None,
     tools: list[dict] | None = None,
+    agent_context: str | None = None,
 ) -> GeminiReply:
     """Run one text turn through Gemini. Returns either text or a tool call.
 
     Called by: `pipeline.flush` after STT, with `history` from
     `scratchpad.history_messages()` and `tools` from `tools.ALL_TOOLS`.
+    `agent_context` is appended to the system instruction so per-user agent data
+    queried on connect is in scope for every turn.
     Offloaded to a worker thread because the underlying SDK call is blocking.
     """
-    return await asyncio.to_thread(_reply_sync, transcript, history, tools)
+    return await asyncio.to_thread(
+        _reply_sync, transcript, history, tools, agent_context
+    )

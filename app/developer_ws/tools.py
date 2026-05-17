@@ -14,22 +14,30 @@ START_REMOTE_AUDIO_BRIDGE_TOOL = {
     "function": {
         "name": START_REMOTE_AUDIO_BRIDGE,
         "description": (
-            "Open a direct audio relay to a remote server. Once this returns successfully, "
-            "the user's microphone audio is forwarded to that remote and the remote's audio "
-            "responses are played back to the user without going through this assistant. "
-            "Call this when the user says any of: 'call the service', 'call the server', "
-            "'call the remote', 'connect to the service/remote/operator', 'dial the service', "
-            "'hand off to the remote/operator', or anything clearly equivalent in intent."
+            "Route the user to one of their registered agents over a direct audio relay. "
+            "Once this returns successfully, the user's microphone audio is forwarded to "
+            "the chosen agent and the agent's audio responses are played back to the user "
+            "without going through this assistant. Pick the agent_id from the registered "
+            "agents list in the system prompt that best matches the user's intent. If the "
+            "user names an agent that isn't in the list, do NOT call this tool — tell them "
+            "which agents are available instead."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": (
+                        "ID of the target agent. MUST be one of the agent_id values from "
+                        "the registered agents list in the system prompt."
+                    ),
+                },
                 "reason": {
                     "type": "string",
-                    "description": "Short reason the user wants the bridge opened.",
+                    "description": "Short reason the user wants to talk to this agent.",
                 },
             },
-            "required": ["reason"],
+            "required": ["agent_id", "reason"],
         },
     },
 }

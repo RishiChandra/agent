@@ -293,6 +293,10 @@ class RemoteAudioBridge:
                 if pcm:
                     self._frames_recv += 1
                     self._audio.add_playback_pcm(pcm)
+                    # Flush opus residual after every remote chunk so the trailing
+                    # sub-frame ships now instead of waiting for the next chunk
+                    # (each 16k→24k resampled chunk leaves a partial 40ms frame).
+                    self._audio.mark_turn_complete()
         except websockets.exceptions.ConnectionClosed as e:
             disconnect_reason = (
                 f"remote_closed code={getattr(e, 'code', '?')} "

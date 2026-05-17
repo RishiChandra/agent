@@ -23,10 +23,38 @@ from . import registry
 from .audio_io import AudioIO
 from .bridge import RemoteAudioBridge
 from .pipeline import SpeechPipeline
+from .queries import fetch_user_agents
 from .scratchpad import Scratchpad
 from .utterance import UtteranceBuffer
 
 log = logging.getLogger("developer_ws")
+
+
+def _format_agent_context(agents: list[dict]) -> str:
+    """Render queried agent rows as a system-prompt block for Gemini."""
+    if not agents:
+        return "Registered agents for this user: (none)."
+    lines = ["Registered agents for this user (from Agent_Registry → Agents):"]
+    for a in agents:
+        parts = [f"{k}={v!r}" for k, v in a.items() if v is not None]
+        lines.append("- " + ", ".join(parts))
+    return "\n".join(lines)
+
+
+async def _load_agents(user_id: str) -> list[dict]:
+    """Query Agent_Registry + Agents on the worker thread (psycopg2 is blocking).
+
+    Returns the raw agent rows; the endpoint also formats them into a system-prompt
+    block for Gemini. On failure, returns [] so the session still comes up (the model
+    just won't have any agents to route to).
+    """
+    try:
+        agents = await asyncio.to_thread(fetch_user_agents, user_id)
+    except Exception as e:
+        log.warning("agent context load failed user_id=%s: %s", user_id, e)
+        return []
+    log.info("loaded %d agent(s) for user_id=%s", len(agents), user_id)
+    return agents
 
 
 async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> None:
@@ -39,11 +67,23 @@ async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> No
     await websocket.accept()
     log.info("connected user_id=%s", user_id)
 
+    agents = await _load_agents(user_id)
+    agent_context = _format_agent_context(agents)
+
     audio = AudioIO(websocket)
     utterance = UtteranceBuffer()
     scratchpad = Scratchpad(user_id=user_id)
     bridge = RemoteAudioBridge(audio, user_id=user_id)
-    pipeline = SpeechPipeline(websocket, user_id, utterance, audio, scratchpad, bridge)
+    pipeline = SpeechPipeline(
+        websocket,
+        user_id,
+        utterance,
+        audio,
+        scratchpad,
+        bridge,
+        agent_context,
+        agents,
+    )
     registry.register(user_id, pipeline)
 
     try:
