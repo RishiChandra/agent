@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings on Windows too; bash heredocs (e.g. the
+# Python bundler inside azure-deploy.sh) break on CRLF because the trailing
+# `\r` makes the close-delimiter (PYEOF) not match.
+*.sh text eol=lf

@@ -47,6 +47,9 @@ ENV/
 # Offline Vosk models (large downloads)
 vosk-model-*/
 
+# Piper TTS voice files (large downloads, fetched via README setup)
+piper_voices/
+
 # Claude Code local state (worktrees, settings)
 .claude/
 
@@ -76,3 +79,8 @@ htmlcov/
 mobile_app/android/app/google-services.json
 mobile_app/ios/Runner/GoogleService-Info.plist
 vertex_ai_service_account.json
+
+# Azure deploy artifacts
+deploy-*.zip
+data-bundle.zip
+creds.tmp.json

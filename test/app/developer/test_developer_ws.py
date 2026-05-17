@@ -128,7 +128,8 @@ async def run_developer_ws_session() -> None:
         "DEVELOPER_WS_USER_ID", "2ba330c0-a999-46f8-ba2c-855880bdcf5b"
     )
     base = os.environ.get("DEVELOPER_WS_BASE", "ws://localhost:8000").rstrip("/")
-    uri = f"{base}/ws/developer/{user_id}"
+    # uri = f"{base}/ws/developer/{user_id}"
+    uri = f"wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws/developer/{user_id}"
     # Example remote: wss://...azurewebsites.net/ws/developer/{user_id}
 
     audio_mgr = AudioManager()

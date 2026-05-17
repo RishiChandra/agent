@@ -14,7 +14,11 @@ load_dotenv()
 from routes.task_routes import router
 from routes.messaging_routes import router as messaging_router
 from websocket_handler import websocket_endpoint
-from developer_ws import developer_websocket_endpoint, preload_vosk_model
+from developer_ws import (
+    developer_websocket_endpoint,
+    preload_piper_voice,
+    preload_vosk_model,
+)
 from developer_ws import registry as developer_registry
 
 
@@ -26,6 +30,11 @@ async def lifespan(app: FastAPI):
         print("[main] vosk model preloaded")
     except Exception as e:
         print(f"[main] vosk preload failed: {e}")
+    try:
+        await preload_piper_voice()
+        print("[main] piper voice preloaded")
+    except Exception as e:
+        print(f"[main] piper preload failed: {e}")
     yield
 
 
