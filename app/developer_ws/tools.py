@@ -1,8 +1,10 @@
 """OpenAI-shaped tool schemas exposed to Gemini.
 
-`ALL_TOOLS` is passed verbatim to `gemini_reply(...)`. When Gemini chooses a tool,
-the pipeline dispatches by `function.name`, matching one of the constants defined
-here (e.g. `START_REMOTE_AUDIO_BRIDGE`).
+`ALL_TOOLS` is passed to `CustomGeminiLLMService` (via `tools_schema=`) which
+forwards the schema list to Gemini's `generateContent` call. When Gemini chooses
+a tool, Pipecat's `LLMService.run_function_calls` dispatches to the matching
+handler registered via `llm.register_function(name, handler)` in
+`SpeechPipeline._register_tools`.
 """
 
 from __future__ import annotations

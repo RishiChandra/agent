@@ -44,7 +44,9 @@ shipped today is `ws://localhost:8001/relay` for local development.
                               │                                         │
                               │   {"audio":"...", "sr":16000, ...}      │  uplink (mic)
                               │ ──────────────────────────────────────► │
-                              │   {"audio":"...", "sr":24000}           │  downlink (speaker)
+                              │   {"audio":"...", "sr":24000}           │  downlink — audio
+                              │ ◄─────────────────────────────────────  │     OR
+                              │   {"type":"say", "text":"..."}          │  downlink — text→TTS
                               │ ◄─────────────────────────────────────  │
                               │           ...                           │
                               │   {"type":"bye", "reason":"..."}        │
@@ -132,6 +134,10 @@ WebSocket messages (JSON-encoded).
 
 ### Downlink (remote → main)
 
+Two payload shapes are accepted; choose whichever fits your service.
+
+**Audio frame** (you've already synthesized speech locally):
+
 ```json
 {
   "audio": "<base64-encoded PCM>",
@@ -139,14 +145,35 @@ WebSocket messages (JSON-encoded).
 }
 ```
 
-- Same encoding (PCM int16 LE mono base64).
+- Same encoding as uplink (PCM int16 LE mono base64).
 - `sr` **should be 24000** (downlink sample rate). Main does not resample;
   any other rate will play back at the wrong speed/pitch.
 - If your audio source is a different rate, resample before sending. The
   reference echo server uses `audioop.ratecv` to upsample 16k → 24k.
 
-Frames with unknown or missing `type` and no `audio` field are silently
-dropped on both sides — safe to add new fields without breaking older peers.
+**Text frame** (let main synthesize for you):
+
+```json
+{
+  "type": "say",
+  "text": "Hello, your order has shipped."
+}
+```
+
+- Main runs the text through its TTS service (Piper, same voice as the
+  built-in assistant) and plays the result to the user.
+- Useful for services that produce text but don't ship TTS — notifications,
+  status updates, scripted responses.
+- The `text` field is required and must be non-empty after trimming;
+  whitespace-only frames are dropped silently.
+- Side-effects: agent text bypasses the assistant's conversation history.
+  Future LLM turns won't know what the agent said. If the user replies,
+  the assistant has no record. Wire it back yourself if you need that.
+- You can freely mix `audio` and `say` frames in the same session.
+
+Frames with unknown or missing `type` and no `audio`/`text` field are
+silently dropped on both sides — safe to add new fields without breaking
+older peers.
 
 ---
 
@@ -232,8 +259,10 @@ A spec-compliant remote service needs to:
 1. Accept a WebSocket connection at `<REMOTE_BRIDGE_URL>`.
 2. Read the first text frame and verify it's a valid `hello`.
 3. Send an `ack` within ~5 seconds (either `accept:true` or `accept:false`).
-4. On accept: read audio frames as JSON `{audio, sr}`, write audio frames
-   in the same shape (PCM int16 LE mono base64, sr=24000 preferred).
+4. On accept: read audio frames as JSON `{audio, sr}`, write either
+   audio frames in the same shape (PCM int16 LE mono base64, sr=24000
+   preferred) **or** text frames `{"type":"say","text":"..."}` to have
+   main synthesize speech for you. Mix freely.
 5. Honor `{"type":"bye"}` from main (respond with bye, close 1000).
 6. Optionally: POST to `<MAIN_BASE>/developer/ping/{user_id}` to have main
    initiate a call to your service.

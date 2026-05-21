@@ -32,6 +32,7 @@ from .audio_io import AudioIO
 log = logging.getLogger("developer_ws")
 
 OnRemoteClose = Callable[[], Awaitable[None]]
+OnSayText = Callable[[str], Awaitable[bool]]
 
 REMOTE_BRIDGE_URL = os.environ.get(
     "DEVELOPER_WS_REMOTE_BRIDGE_URL", "ws://localhost:8001/relay"
@@ -73,14 +74,18 @@ class RemoteAudioBridge:
 
     Constructed by: `developer_websocket_endpoint` in endpoint.py.
     Driven by:
-      - `start(url)` — called by `pipeline._handle_tool_call` (Gemini tool) or
-        `pipeline.on_service_ping` (HTTP ping).
+      - `start(url)` — called by the `start_remote_audio_bridge` tool handler
+        registered in `pipeline._register_tools` (user-initiated) or by
+        `pipeline.on_service_ping` (service-initiated via HTTP ping).
       - `send_uplink_pcm(pcm)` — called by `_handle_audio` in endpoint.py while
-        `bridge.active` is True, instead of feeding the utterance buffer.
+        `bridge.active` is True; uplink audio bypasses STT/LLM/TTS in that mode.
       - `close()` — called by `_drain_on_close` and `_handle_interrupt` (user "stop").
     Notifies up:
       - `_on_remote_close` callback (registered by `pipeline.__init__` via
         `set_on_remote_close`) fires when the remote — not us — closes the WS.
+      - `_on_say_text` callback (registered by `pipeline.__init__` via
+        `set_on_say_text`) fires for each remote `{"type":"say","text":...}`
+        frame so the text can be synthesized via the local TTS pipeline.
     """
 
     def __init__(self, audio_io: AudioIO, user_id: str = "") -> None:
@@ -91,11 +96,16 @@ class RemoteAudioBridge:
         self._active = False
         # Set this to be notified when the remote (not local) closes the connection.
         self._on_remote_close: Optional[OnRemoteClose] = None
+        # Set this to handle remote `{"type":"say","text":...}` frames — the remote
+        # is asking main to TTS the text and play it to the user. If unset, say
+        # frames are silently dropped.
+        self._on_say_text: Optional[OnSayText] = None
         # True while close() is unwinding; tells _recv_loop's finally not to fire on_remote_close.
         self._self_closing = False
         # Frame counters for diagnostic logging on disconnect.
         self._frames_sent = 0
         self._frames_recv = 0
+        self._frames_say = 0
 
     def set_on_remote_close(self, cb: Optional[OnRemoteClose]) -> None:
         """Register the callback fired when the remote closes the bridge.
@@ -105,6 +115,16 @@ class RemoteAudioBridge:
         """
         self._on_remote_close = cb
 
+    def set_on_say_text(self, cb: Optional[OnSayText]) -> None:
+        """Register the callback fired for remote `{"type":"say","text":...}` frames.
+
+        Called once by: `pipeline.__init__`, passing `self.inject_assistant_text`.
+        Invoked from: `_recv_loop` for every well-formed `say` frame received.
+        The callback returns a bool (True if the text was queued for TTS, False
+        if the session is gone). The bridge logs but does not act on the result.
+        """
+        self._on_say_text = cb
+
     @property
     def active(self) -> bool:
         return self._active
@@ -112,7 +132,8 @@ class RemoteAudioBridge:
     async def start(self, url: str = REMOTE_BRIDGE_URL) -> BridgeStartResult:
         """Open the outbound WS and complete the hello/ack handshake.
 
-        Called by: `pipeline._handle_tool_call`, `pipeline.on_service_ping`.
+        Called by: the `start_remote_audio_bridge` tool handler in
+        `pipeline._register_tools` and by `pipeline.on_service_ping`.
         On success: spawns `_recv_loop` as a task and sets `_active = True`.
         On failure: closes the socket and returns an outcome the pipeline maps to
         a TTS message via `_fail_message(result)`.
@@ -273,12 +294,17 @@ class RemoteAudioBridge:
         try:
             assert self._ws is not None
             async for raw in self._ws:
-                # Control frames (e.g., bye) are handled inline; everything else
-                # is treated as audio if it has an `audio` field.
+                # Control + text frames (`bye`, `say`) are handled inline.
+                # Anything else falls through to the audio extractor below; if it
+                # has no `audio` field it is silently dropped.
                 if isinstance(raw, str):
                     try:
                         ctrl = json.loads(raw)
-                        if isinstance(ctrl, dict) and ctrl.get("type") == "bye":
+                    except (ValueError, TypeError):
+                        ctrl = None
+                    if isinstance(ctrl, dict):
+                        ctrl_type = ctrl.get("type")
+                        if ctrl_type == "bye":
                             disconnect_reason = (
                                 f"remote_bye reason={ctrl.get('reason', '')!r}"
                             )
@@ -287,8 +313,9 @@ class RemoteAudioBridge:
                                 self._user_id, ctrl.get("reason", ""),
                             )
                             break
-                    except (ValueError, TypeError):
-                        pass
+                        if ctrl_type == "say":
+                            await self._handle_say(ctrl)
+                            continue
                 pcm = self._extract_downlink_pcm(raw)
                 if pcm:
                     self._frames_recv += 1
@@ -310,9 +337,10 @@ class RemoteAudioBridge:
             was_active = self._active
             self._active = False
             log.info(
-                "bridge session ended user_id=%s self_closing=%s sent=%d recv=%d reason=%s",
+                "bridge session ended user_id=%s self_closing=%s sent=%d recv=%d say=%d reason=%s",
                 self._user_id, self._self_closing,
-                self._frames_sent, self._frames_recv, disconnect_reason,
+                self._frames_sent, self._frames_recv, self._frames_say,
+                disconnect_reason,
             )
             # mark_turn_complete here flushes any partial Opus residual so the final
             # remote chunk reaches the user even if the remote closes mid-stream.
@@ -324,6 +352,39 @@ class RemoteAudioBridge:
                     log.exception(
                         "bridge on_remote_close raised user_id=%s", self._user_id,
                     )
+
+    async def _handle_say(self, frame: dict) -> None:
+        """Process a remote `{"type":"say","text":"..."}` frame.
+
+        The remote is asking main to TTS the text and play it to the user.
+        Bridges the gap between fully-audio remotes (which do their own TTS)
+        and remotes that just want to deliver text.
+
+        Drops silently if the `text` field is missing/empty or if no callback
+        was registered (i.e., the session bound to this bridge has no handler).
+        """
+        text = str(frame.get("text") or "").strip()
+        if not text:
+            log.debug(
+                "bridge say dropped (empty text) user_id=%s", self._user_id,
+            )
+            return
+        if self._on_say_text is None:
+            log.warning(
+                "bridge say received but no handler is registered user_id=%s text=%r",
+                self._user_id, text[:120],
+            )
+            return
+        self._frames_say += 1
+        log.info(
+            "bridge say received user_id=%s text=%r", self._user_id, text[:120],
+        )
+        try:
+            await self._on_say_text(text)
+        except Exception:
+            log.exception(
+                "bridge on_say_text raised user_id=%s", self._user_id,
+            )
 
     @staticmethod
     def _extract_downlink_pcm(raw) -> bytes | None:

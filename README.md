@@ -30,22 +30,20 @@ Bash equivalent: ```. .venv/Scripts/activate``` (Git Bash on Windows) or ```sour
 ### 2. Vosk STT model (~68 MB, gitignored)
 
 ```bash
-curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
-python -c "import zipfile; zipfile.ZipFile('vosk-model.zip').extractall('.')"
-rm vosk-model.zip
+python scripts/setup_vosk_model.py
 ```
 
-Sanity check: ```vosk-model-small-en-us-0.15/am/final.mdl``` must exist.
+The script idempotently downloads and unpacks ```vosk-model-small-en-us-0.15``` at the repo root — matches the path checked by ```azure-deploy.sh``` preflight, so no env var change is needed locally. Pick a different model with ```--model <name>``` (see [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)). Sanity check: ```vosk-model-small-en-us-0.15/am/final.mdl``` must exist.
 
 ### 3. Piper TTS voice (~60 MB, gitignored)
 
 Cross-platform neural TTS. Same ```.onnx``` voice file is used by the local server **and** the deployed server, so both sound identical.
 
 ```bash
-mkdir -p piper_voices
-curl -L -o piper_voices/en_US-amy-medium.onnx       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx
-curl -L -o piper_voices/en_US-amy-medium.onnx.json  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
+python scripts/setup_piper_voice.py
 ```
+
+The script idempotently downloads ```en_US-amy-medium``` into ```piper_voices/``` — matches the default in ```app/developer_ws/tts.py``` so no env var change is needed locally. Pick a different voice with ```--voice <id>``` (see [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)).
 
 ### 4. Windows: install Opus native library
 

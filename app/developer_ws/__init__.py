@@ -1,8 +1,10 @@
 """Developer WebSocket subsystem: voice-loop over WS, with optional bridge to a remote service.
 
-Inbound mic audio → Vosk STT → Gemini text (with tools) → pyttsx3 TTS → outbound audio.
+Inbound mic audio → Vosk STT → Gemini text (with tools) → Piper TTS → outbound audio.
+The pipeline is built on Pipecat (see `pipeline.py` + `pipecat_bits.py` + `pipecat_llm.py`).
 When Gemini calls `start_remote_audio_bridge`, frames are relayed verbatim to a remote
-WebSocket service instead of going through STT/LLM/TTS. See DESIGN.md and BRIDGE_PROTOCOL.md.
+WebSocket service instead of going through STT/LLM/TTS. The remote can mix raw audio
+frames with `{"type":"say","text":"..."}` text frames; see BRIDGE_PROTOCOL.md and DESIGN.md.
 """
 
 from .audio_io import AudioIO
