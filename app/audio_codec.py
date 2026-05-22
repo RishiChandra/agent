@@ -1,6 +1,7 @@
 """Shared device audio codec: Opus TLV uplink/downlink and PCM helpers (no transport / queue logic)."""
 
 import audioop
+import os
 import struct
 from typing import List, Optional
 
@@ -28,8 +29,12 @@ UPLINK_SAMPLE_RATE = 16000
 UPLINK_FRAME_MS = 20
 UPLINK_FRAME_SAMPLES = UPLINK_SAMPLE_RATE * UPLINK_FRAME_MS // 1000
 
-# Playback bundling (JSON+base64 overhead vs latency).
-COALESCE_TARGET_MS = 1000
+# Playback bundling: trade JSON+base64 overhead against perceived latency.
+# Smaller = audio reaches the user faster but more WS frames (~5x at 200ms
+# vs ~1x at 1000ms for a typical 5s reply). 200ms is comfortably above the
+# Opus frame size (40ms) so each bundle still amortises the per-message cost.
+# Override at runtime with DEVELOPER_WS_COALESCE_MS if needed.
+COALESCE_TARGET_MS = int(os.environ.get("DEVELOPER_WS_COALESCE_MS", "200"))
 COALESCE_WAIT_S = COALESCE_TARGET_MS / 1000
 
 SILENCE_DROP_RMS = 30

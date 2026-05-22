@@ -29,7 +29,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from pipecat.frames.frames import (
     CancelFrame,
@@ -125,6 +125,16 @@ class CustomGeminiLLMService(LLMService):
     def context(self) -> LLMContext:
         return self._context
 
+    def set_tools_schema(self, tools_schema) -> None:
+        """Replace the tool-declaration list sent to Gemini on each call.
+
+        Called by `SpeechPipeline._register_tools(...)` once, alongside
+        registering the matching Python handlers — so the schemas Gemini
+        sees and the handlers we dispatch to are bound from a single
+        source list.
+        """
+        self._tools_schema = tools_schema
+
     def _add_message(self, role: str, content: str) -> None:
         if not (content or "").strip():
             return
@@ -188,6 +198,7 @@ class CustomGeminiLLMService(LLMService):
         tools = self._tools_schema
 
         await self.push_frame(LLMFullResponseStartFrame())
+        t_llm = time.monotonic()
         try:
             response = await asyncio.to_thread(
                 call_gemini, list(messages), tools, "auto"
@@ -196,6 +207,8 @@ class CustomGeminiLLMService(LLMService):
             log.warning("gemini generateContent failed user_id=%s err=%s", self._user_id, e)
             await self.push_frame(LLMFullResponseEndFrame())
             return
+        llm_ms = int((time.monotonic() - t_llm) * 1000)
+        log.info("llm gemini_ms=%d user_id=%s", llm_ms, self._user_id)
 
         wrapped = gemini_response_to_openai_like(response)
         msg = wrapped.choices[0].message

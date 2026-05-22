@@ -133,14 +133,17 @@ class VoskUtteranceSTTProcessor(FrameProcessor):
             await self.push_frame(frame, direction)
             if not pcm:
                 return
+            t_stt = time.monotonic()
             try:
                 text = await transcribe_pcm16(pcm, self._sample_rate)
             except Exception:
                 log.exception("vosk transcribe failed user_id=%s", self._user_id)
                 return
+            stt_ms = int((time.monotonic() - t_stt) * 1000)
             log.info(
-                "user_id=%s transcript=%r (pcm=%dB ~%.2fs)",
+                "user_id=%s transcript=%r (pcm=%dB ~%.2fs) stt_ms=%d",
                 self._user_id, text, len(pcm), len(pcm) / (2 * self._sample_rate),
+                stt_ms,
             )
             if text and text.strip():
                 await self.push_frame(
@@ -190,14 +193,19 @@ class PiperTTSProcessor(FrameProcessor):
         if not t:
             return
         started = False
+        t_start = time.monotonic()
+        ttfc_ms: int | None = None
+        chunks = 0
         try:
             async for pcm in synthesize_speech_pcm24_stream(t):
                 if not pcm:
                     continue
+                chunks += 1
                 if not started:
                     # Defer BotStarted until we actually have audio — if Piper
                     # fails before producing anything, we don't open a turn
                     # that never closes.
+                    ttfc_ms = int((time.monotonic() - t_start) * 1000)
                     await self.push_frame(BotStartedSpeakingFrame(), direction)
                     started = True
                 await self.push_frame(
@@ -212,6 +220,11 @@ class PiperTTSProcessor(FrameProcessor):
             log.exception("piper stream failed text=%r", t[:80])
         finally:
             if started:
+                total_ms = int((time.monotonic() - t_start) * 1000)
+                log.info(
+                    "tts text=%r ttfc_ms=%s total_ms=%d chunks=%d",
+                    t[:60], ttfc_ms, total_ms, chunks,
+                )
                 await self.push_frame(BotStoppedSpeakingFrame(), direction)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:

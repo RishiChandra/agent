@@ -179,34 +179,58 @@ with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
 PYEOF
 
 # Push zip to Kudu.
-# --track-status false avoids the CLI returning 504 while Azure is still
-# building. Deployment continues server-side; status is polled separately below.
+# --track-status false avoids the CLI blocking until Oryx finishes building.
+# Even so, the CLI's *initial* POST to Kudu has a ~230s gateway timeout. With
+# heavy deps (e.g. pipecat-ai pulls ~500 MB of wheels), Oryx can take 5–10 min
+# to finish, and Kudu may not respond within 230s, producing a misleading
+# 504 GatewayTimeout from the CLI even though the upload + build succeeded
+# server-side. We therefore tolerate a non-zero exit from `az webapp deploy`
+# and rely on the polling loop below to determine the real outcome.
 echo "Deploying zip to App Service..."
+DEPLOY_EXIT=0
 az webapp deploy \
     --name "$APP_NAME" \
     --resource-group "$RESOURCE_GROUP" \
     --src-path "$ZIP_FILE" \
     --type zip \
     --track-status false \
-    --output none
+    --output none || DEPLOY_EXIT=$?
+if [ "$DEPLOY_EXIT" -ne 0 ]; then
+    echo "  az CLI exit=$DEPLOY_EXIT (almost always a 504 gateway timeout — the build is"
+    echo "  still running server-side). Polling Kudu directly for the real status..."
+fi
 
 # Wait for the build/deploy to finish on Azure, then report final status.
+# Status codes (from Microsoft.Web/sites deployments):
+#   0=NotStarted  1=Pending  2=BuildPending/Building  3=Failed  4=Success  5=Cancelled
 echo "Waiting for deployment to complete on Azure..."
-DEPLOY_DEADLINE=$(( $(date +%s) + 900 ))  # 15 minutes
+DEPLOY_DEADLINE=$(( $(date +%s) + 1200 ))  # 20 minutes (heavy deps need 7–10 min)
+FINAL_STATUS=""
 while [ "$(date +%s)" -lt "$DEPLOY_DEADLINE" ]; do
     STATUS=$(az webapp log deployment list \
         --name "$APP_NAME" \
         --resource-group "$RESOURCE_GROUP" \
         --query "[0].status" -o tsv 2>/dev/null || echo "?")
     case "$STATUS" in
-        4) echo "  status=Success"; break ;;
-        3) echo "  status=Failed — check the log_url from 'az webapp log deployment list'"; break ;;
-        *) echo "  status=$STATUS (pending/building/deploying); sleeping 15s..." ;;
+        4) echo "  status=4 (Success)"; FINAL_STATUS="success"; break ;;
+        3) echo "  status=3 (Failed) — check the log_url from 'az webapp log deployment list'"; FINAL_STATUS="failed"; break ;;
+        5) echo "  status=5 (Cancelled)"; FINAL_STATUS="cancelled"; break ;;
+        0|1|2) echo "  status=$STATUS (building); sleeping 15s..."; sleep 15 ;;
+        *) echo "  status=$STATUS (unknown); sleeping 15s..."; sleep 15 ;;
     esac
-    sleep 15
 done
 
 rm -f "$ZIP_FILE"
+
+if [ "$FINAL_STATUS" = "failed" ] || [ "$FINAL_STATUS" = "cancelled" ]; then
+    echo "Deployment did not succeed (final status: $FINAL_STATUS)."
+    exit 1
+fi
+if [ -z "$FINAL_STATUS" ]; then
+    echo "Deployment did not complete within the deadline. Check status manually:"
+    echo "  az webapp log deployment list -g $RESOURCE_GROUP -n $APP_NAME"
+    exit 1
+fi
 
 # Output URLs
 APP_URL=$(az webapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query "defaultHostName" --output tsv)

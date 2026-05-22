@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 from pipecat.frames.frames import (
@@ -64,7 +64,7 @@ from .pipecat_bits import (
 )
 from .pipecat_llm import CustomGeminiLLMService
 from .scratchpad import Scratchpad
-from .tools import ALL_TOOLS, START_REMOTE_AUDIO_BRIDGE
+from .tools import ALL_TOOLS, END_CONVERSATION, START_REMOTE_AUDIO_BRIDGE
 from .utterance import UtteranceBuffer
 
 log = logging.getLogger("developer_ws")
@@ -75,6 +75,7 @@ _BRIDGE_FAIL_NO_PICKUP = "The remote service didn't pick up."
 _BRIDGE_FAIL_REJECTED = "The remote service declined the call."
 _BRIDGE_DISCONNECT = "The remote service disconnected. You're back with me now."
 _SERVICE_PING_ANNOUNCE = "Your service wants to speak with you. Connecting you now."
+_END_CONVERSATION_ACK = "Goodbye! Take care."
 
 
 def _fail_message(result: BridgeStartResult) -> str:
@@ -129,12 +130,14 @@ class SpeechPipeline:
         self._bridge.set_on_say_text(self.inject_assistant_text)
 
         # Build the LLM service first so we can wire tool handlers + scratchpad.
+        # `_register_tools(ALL_TOOLS)` owns both halves of tool binding (schemas
+        # sent to Gemini + Python handlers dispatched on function-call frames),
+        # so we don't pass `tools_schema=` here.
         self._llm = CustomGeminiLLMService(
             user_id=user_id,
-            tools_schema=ALL_TOOLS,
             on_message_added=self._mirror_to_scratchpad,
         )
-        self._register_tools()
+        self._register_tools(ALL_TOOLS)
 
         # Pipeline: SessionSource → BridgeGate → VoskSTT → LLM → TTS → AudioIOSink.
         self._source = SessionSource()
@@ -315,51 +318,145 @@ class SpeechPipeline:
             self._scratchpad.add_assistant(content)
         # "system" + "tool" roles are skipped — scratchpad only logged user/assistant before.
 
-    def _register_tools(self) -> None:
-        """Register tool handlers with the LLM service.
+    def _register_tools(self, tools: list[dict]) -> None:
+        """Bind each schema in `tools` to its handler — both halves at once.
 
-        Each handler implements the immediate-ack workaround:
-          1. Push `TTSSpeakFrame` with our exact ack string (synthesised in
-             parallel with the side effect).
-          2. Run the side effect.
-          3. Return via `result_callback(..., run_llm=False)` so the LLM does
-             not generate a second response.
+        Tool wiring has two distinct surfaces:
+          1. **Schemas** go up to Gemini in `generateContent` so it knows what
+             tools exist (name, description, parameter shape). Set on the LLM
+             service via `set_tools_schema(...)`.
+          2. **Handlers** stay in our process and run when Gemini emits a
+             function call. Registered on the LLM service via
+             `register_function(name, handler, ...)`.
+
+        Not every tool needs a handler — server-handled tools (currently
+        `google_search`, Gemini's built-in grounding) carry only a declaration
+        and are executed inside Gemini's runtime. The fail-fast check below
+        only validates that **function-typed** tools have matching handlers.
         """
+        handlers: dict[str, Callable[[FunctionCallParams], Awaitable[None]]] = {
+            START_REMOTE_AUDIO_BRIDGE: self._handle_start_remote_audio_bridge,
+            END_CONVERSATION: self._handle_end_conversation,
+        }
 
-        async def handle_start_bridge(params: FunctionCallParams) -> None:
-            # 1. Deterministic ack starts speaking immediately.
-            await params.llm.push_frame(TTSSpeakFrame(_BRIDGE_ACK))
-            self._llm.add_assistant_announcement(_BRIDGE_ACK)
-
-            # 2. Side effect.
-            result = await self._bridge.start(REMOTE_BRIDGE_URL)
-            log.info(
-                "user_id=%s bridge start result ok=%s outcome=%s detail=%r",
-                self._user_id, result.ok, result.outcome, result.detail,
+        function_tool_names = {
+            tool["function"]["name"]
+            for tool in tools
+            if tool.get("type") == "function" and "function" in tool
+        }
+        missing_handler = function_tool_names - handlers.keys()
+        missing_schema = handlers.keys() - function_tool_names
+        if missing_handler:
+            raise ValueError(
+                f"Function tools declared with no handler in _register_tools: "
+                f"{sorted(missing_handler)}"
+            )
+        if missing_schema:
+            raise ValueError(
+                f"Handlers in _register_tools with no declared function schema: "
+                f"{sorted(missing_schema)}"
             )
 
-            # 3a. Failure → speak failure ack + record.
-            if not result.ok:
-                fail = _fail_message(result)
-                await params.llm.push_frame(TTSSpeakFrame(fail))
-                self._llm.add_assistant_announcement(fail)
+        self._llm.set_tools_schema(tools)
+        for name, handler in handlers.items():
+            self._llm.register_function(name, handler, cancel_on_interruption=True)
 
-            # 3b. Return to context with run_llm=False so no Gemini follow-up.
-            await params.result_callback(
-                {
-                    "ok": result.ok,
-                    "outcome": result.outcome,
-                    "service_id": result.service_id,
-                    "detail": result.detail,
-                },
-                properties=FunctionCallResultProperties(run_llm=False),
-            )
+    async def _handle_start_remote_audio_bridge(self, params: FunctionCallParams) -> None:
+        """Handler for the `start_remote_audio_bridge` Gemini tool.
 
-        self._llm.register_function(
-            START_REMOTE_AUDIO_BRIDGE,
-            handle_start_bridge,
-            cancel_on_interruption=True,
+        Implements the immediate-ack workaround:
+          1. Push `TTSSpeakFrame` with our exact ack — synthesised in parallel
+             with the side effect; no LLM roundtrip for the ack text.
+          2. Run the side effect (dial the remote bridge).
+          3. On failure, push a second `TTSSpeakFrame` with the failure ack.
+          4. Return via `result_callback(..., run_llm=False)` so Gemini does
+             not generate a follow-up response after the tool result lands in
+             context.
+        """
+        # 1. Deterministic ack starts speaking immediately.
+        await params.llm.push_frame(TTSSpeakFrame(_BRIDGE_ACK))
+        self._llm.add_assistant_announcement(_BRIDGE_ACK)
+
+        # 2. Side effect.
+        result = await self._bridge.start(REMOTE_BRIDGE_URL)
+        log.info(
+            "user_id=%s bridge start result ok=%s outcome=%s detail=%r",
+            self._user_id, result.ok, result.outcome, result.detail,
         )
+
+        # 3. Failure → speak failure ack + record.
+        if not result.ok:
+            fail = _fail_message(result)
+            await params.llm.push_frame(TTSSpeakFrame(fail))
+            self._llm.add_assistant_announcement(fail)
+
+        # 4. Return to context with run_llm=False so no Gemini follow-up.
+        await params.result_callback(
+            {
+                "ok": result.ok,
+                "outcome": result.outcome,
+                "service_id": result.service_id,
+                "detail": result.detail,
+            },
+            properties=FunctionCallResultProperties(run_llm=False),
+        )
+
+    async def _handle_end_conversation(self, params: FunctionCallParams) -> None:
+        """Handler for the `end_conversation` Gemini tool.
+
+        The tool description in ``tools.py`` is intentionally permissive about
+        which user phrasings should trigger this — Gemini infers intent
+        semantically so we don't have to maintain a list of goodbye patterns
+        in code.
+
+        Sequence:
+          1. Push a brief goodbye via ``TTSSpeakFrame`` so the user hears it
+             synthesised in parallel with the close-out.
+          2. Return ``run_llm=False`` so Gemini doesn't try to follow up.
+          3. Spawn a background task that waits for AudioIO to drain, then
+             closes the WebSocket with code 1000. The endpoint's receive
+             loop catches the close and runs the normal teardown path
+             (``_drain_on_close`` → ``pipeline.close()``).
+        """
+        reason = str(params.arguments.get("reason") or "").strip() or "user_wrapup"
+        log.info(
+            "user_id=%s end_conversation tool fired reason=%r",
+            self._user_id, reason,
+        )
+        await params.llm.push_frame(TTSSpeakFrame(_END_CONVERSATION_ACK))
+        self._llm.add_assistant_announcement(_END_CONVERSATION_ACK)
+
+        await params.result_callback(
+            {"closed": True, "reason": reason},
+            properties=FunctionCallResultProperties(run_llm=False),
+        )
+
+        asyncio.create_task(self._close_session_after_speak(_END_CONVERSATION_ACK))
+
+    async def _close_session_after_speak(self, text: str) -> None:
+        """Wait for the goodbye TTS to play, then close the WebSocket.
+
+        Timing is estimated, not measured: a short initial delay lets the
+        ``TTSSpeakFrame`` enter the pipeline, then we sleep proportional to
+        word count so playback has time to land at the client, then close.
+        The receive loop in ``endpoint.py`` catches the close and runs the
+        full session teardown.
+        """
+        # Initial beat for the frame to enter the pipeline + Piper to start.
+        await asyncio.sleep(0.4)
+        # ~400ms/word at average TTS rate + a 0.5s tail to flush AudioIO's coalesce.
+        word_count = max(1, len(text.split()))
+        synthesis_and_playback = min(0.4 * word_count + 0.5, 8.0)
+        await asyncio.sleep(synthesis_and_playback)
+        if not self._alive():
+            return
+        try:
+            await self._ws.close(code=1000, reason="conversation ended")
+            log.info("user_id=%s end_conversation closed ws", self._user_id)
+        except Exception:
+            log.exception(
+                "user_id=%s end_conversation ws close failed", self._user_id,
+            )
 
     async def _on_bridge_remote_close(self) -> None:
         """Remote (not us) closed the bridge → speak the notice + record."""
