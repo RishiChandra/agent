@@ -92,6 +92,8 @@ def _transcribe_sync(pcm: bytes, sample_rate: int) -> str:
 async def transcribe_pcm16(pcm: bytes, sample_rate: int) -> str:
     """Transcribe mono int16 PCM. Offloaded to a worker thread.
 
-    Called by: `pipeline.flush` once per utterance. Returns "" on no-speech.
+    Called by: `VoskUtteranceSTTProcessor.process_frame` in `pipecat_bits.py`
+    on each `UserStoppedSpeakingFrame`, with the audio accumulated since the
+    matching start frame. Returns "" on no-speech.
     """
     return await asyncio.to_thread(_transcribe_sync, pcm, sample_rate)

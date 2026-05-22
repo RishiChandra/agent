@@ -2,9 +2,11 @@
 
 Owns the lifecycle of one voice session: accept → wire up AudioIO + UtteranceBuffer +
 Scratchpad + Bridge + Pipeline → register with the in-process registry (so HTTP pings
-can reach this session) → loop on incoming JSON frames → drain on close. Hands raw
-audio frames to the utterance buffer and trigger points (turn_complete, silence timer)
-to the pipeline.
+can reach this session) → loop on incoming JSON frames → drain on close.
+
+The Pipeline is now a Pipecat pipeline (see `pipeline.py`); this file pushes frames
+into it via the `SpeechPipeline.feed_audio` / `signal_user_stopped` / `interrupt`
+shims rather than calling STT/LLM/TTS directly.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ import asyncio
 import base64
 import json
 import logging
-import traceback
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -44,6 +45,7 @@ async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> No
     scratchpad = Scratchpad(user_id=user_id)
     bridge = RemoteAudioBridge(audio, user_id=user_id)
     pipeline = SpeechPipeline(websocket, user_id, utterance, audio, scratchpad, bridge)
+    await pipeline.start()
     registry.register(user_id, pipeline)
 
     try:
@@ -72,9 +74,9 @@ async def _receive_loop(
 ) -> None:
     """Read incoming JSON frames forever; dispatch by frame type.
 
-    Called by: `developer_websocket_endpoint` only.
-    Dispatches to: `_handle_interrupt`, `_handle_audio`, `pipeline.schedule_flush`.
-    Terminates on WebSocketDisconnect (bubbles up to the endpoint's try/finally).
+    Audio frames flow through `pipeline.feed_audio(pcm)`; turn-complete /
+    silence-timer signals call `pipeline.signal_user_stopped()`; interrupts
+    call `pipeline.interrupt()`.
     """
     while True:
         try:
@@ -88,7 +90,7 @@ async def _receive_loop(
         data = json.loads(msg)
 
         if _is_interrupt(data):
-            await _handle_interrupt(audio, utterance, bridge)
+            await _handle_interrupt(audio, utterance, bridge, pipeline)
             continue
 
         if "audio" in data:
@@ -97,7 +99,7 @@ async def _receive_loop(
 
         if data.get("turn_complete") is True and not bridge.active:
             await utterance.bump_arm_id()
-            pipeline.schedule_flush()
+            await pipeline.signal_user_stopped()
 
 
 def _is_interrupt(data: dict) -> bool:
@@ -108,13 +110,13 @@ def _is_interrupt(data: dict) -> bool:
 
 
 async def _handle_interrupt(
-    audio: AudioIO, utterance: UtteranceBuffer, bridge: RemoteAudioBridge
+    audio: AudioIO,
+    utterance: UtteranceBuffer,
+    bridge: RemoteAudioBridge,
+    pipeline: SpeechPipeline,
 ) -> None:
-    # User interrupt tears down the bridge so they regain the local assistant.
-    if bridge.active:
-        await bridge.close()
-    await utterance.snapshot_and_clear()
     await utterance.bump_arm_id()
+    await pipeline.interrupt()
     await audio.interrupt()
 
 
@@ -128,38 +130,35 @@ async def _handle_audio(
 ) -> None:
     """Process one audio frame from the client.
 
-    Called by: `_receive_loop` (one call per `{audio: ...}` frame).
-    Two modes:
-      - bridge.active → `bridge.send_uplink_pcm(pcm)`, skip local STT/LLM/TTS.
-      - otherwise    → `utterance.extend(pcm)`, then either `pipeline.schedule_flush`
-        (if `turn_complete:true`) or `utterance.arm_timer(pipeline.flush)` (if the
-        batch's RMS clears the VAD threshold).
+    Bridge-active path: forward raw uplink to the remote, skip the pipeline.
+    Normal path: push the audio into the Pipecat pipeline, arm the silence
+    timer (which calls `pipeline.signal_user_stopped` on fire).
     """
     pcm = _decode_audio_payload(data, user_id, audio)
 
-    # Bridge mode: skip local STT/LLM/TTS entirely; relay raw uplink to the remote.
     if bridge.active:
         if pcm:
             await bridge.send_uplink_pcm(pcm)
         return
 
     if pcm:
-        await utterance.extend(pcm)
+        await pipeline.feed_audio(pcm)
 
     if data.get("turn_complete") is True:
         await utterance.bump_arm_id()
-        pipeline.schedule_flush()
+        await pipeline.signal_user_stopped()
         return
 
-    # Only re-arm the silence timer for batches with speech energy. Silent
-    # batches would otherwise keep the timer perpetually deferred.
     if pcm:
         from audio_codec import rms_int16_le
         _rms = rms_int16_le(pcm)
         _has = utterance.has_speech(pcm)
-        log.info("audio batch user_id=%s bytes=%d rms=%d has_speech=%s", user_id, len(pcm), _rms, _has)
+        log.info(
+            "audio batch user_id=%s bytes=%d rms=%d has_speech=%s",
+            user_id, len(pcm), _rms, _has,
+        )
         if _has:
-            await utterance.arm_timer(pipeline.flush)
+            await utterance.arm_timer(pipeline.signal_user_stopped)
 
 
 def _decode_audio_payload(data: dict, user_id: str, audio: AudioIO) -> bytes | None:
@@ -185,19 +184,16 @@ async def _drain_on_close(
 ) -> None:
     """Best-effort cleanup after the socket closes.
 
-    Called by: `developer_websocket_endpoint` finally block (always runs).
-    Cancels any pending silence timer, closes the bridge (sends `bye`), flushes any
-    leftover utterance audio through STT/LLM/TTS (45s hard timeout), and shuts down
-    the downlink Opus encoder so the next session starts clean.
+    Cancels any pending silence timer, lets the pipeline flush an in-flight
+    utterance via its own `drain()`, then closes the bridge + pipeline.
     """
     await utterance.bump_arm_id()
-    await bridge.close()
     try:
-        if await utterance.has_data():
-            # Bound the final flush so a stuck STT/LLM/TTS can't hold the connection open.
-            await asyncio.wait_for(pipeline.flush(), timeout=45.0)
-    except asyncio.TimeoutError:
-        log.warning("shutdown flush timed out user_id=%s", user_id)
+        await pipeline.drain()
     except Exception:
-        traceback.print_exc()
+        log.exception("pipeline drain failed user_id=%s", user_id)
+    try:
+        await pipeline.close()
+    except Exception:
+        log.exception("pipeline close failed user_id=%s", user_id)
     await audio.shutdown_playback()

@@ -47,16 +47,16 @@ class AudioIO:
     Used by:
       - `_decode_audio_payload` in endpoint.py → `decode_uplink_opus(tlv)` for Opus
         uplinks; raw uplinks bypass this.
-      - `pipeline._speak` → `add_playback_pcm(pcm)` to queue TTS output.
-      - `bridge._recv_loop` → `add_playback_pcm(pcm)` to queue remote bridge audio.
-      - `pipeline._speak`, `pipeline.flush`, `pipeline._handle_tool_call` →
-        `mark_turn_complete()` to flush Opus residual at turn boundaries.
-      - `bridge._recv_loop` finally block → `mark_turn_complete()` so the last
-        bridge chunk reaches the user even after a sudden remote close.
+      - `AudioIOSinkProcessor` (pipecat_bits.py) → `add_playback_pcm(pcm)` to queue
+        TTS output and `mark_turn_complete()` on `BotStoppedSpeakingFrame`. Same
+        processor calls `interrupt()` on `InterruptionFrame` and `shutdown_playback()`
+        on `EndFrame` / `CancelFrame`.
+      - `bridge._recv_loop` → `add_playback_pcm(pcm)` to queue remote bridge audio,
+        plus `mark_turn_complete()` in its finally block so the last bridge chunk
+        reaches the user even after a sudden remote close.
       - `_handle_interrupt` in endpoint.py → `interrupt()` to clear pending playback
-        and notify the client.
-      - `_drain_on_close` in endpoint.py and `pipeline._abort` → `shutdown_playback()`
-        on socket teardown.
+        and notify the client (in addition to the pipeline's interrupt frame).
+      - `_drain_on_close` in endpoint.py → `shutdown_playback()` on socket teardown.
     """
 
     def __init__(self, websocket: WebSocket) -> None:

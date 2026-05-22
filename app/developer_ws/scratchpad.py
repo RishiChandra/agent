@@ -1,9 +1,13 @@
-"""Per-connection turn log: user transcripts + assistant replies.
+"""Per-connection turn log dumped to stdout on socket close.
 
-`history_messages()` returns prior turns in Gemini-style `{role, content}` form so each
-new LLM call sees the conversation so far. Special assistant entries (bridge open/close
-notifications) are added as plain text so the model can infer current bridge state from
-history alone. Dumped to stdout on socket close for post-session inspection.
+The authoritative conversation history lives inside `CustomGeminiLLMService`'s
+`LLMContext`; this is a thin mirror populated via the `on_message_added` callback
+the pipeline wires up. Kept separate so a one-line transcript per session lands
+in stdout (`render()` via `dump()`) regardless of log level — handy for grepping
+post-mortems without an LLM client.
+
+Append-only. `add_user` and `add_assistant` are idempotent on empty/whitespace
+input. `dump()` is called by `developer_websocket_endpoint` in its finally block.
 """
 
 from __future__ import annotations
@@ -29,7 +33,9 @@ class Scratchpad:
         return time.monotonic() - self._t0
 
     def add_user(self, text: str) -> None:
-        """Append a user turn. Called by `pipeline.flush` after STT returns."""
+        """Append a user turn. Called by `pipeline._mirror_to_scratchpad` whenever
+        `CustomGeminiLLMService` appends a user message to its LLMContext.
+        """
         t = (text or "").strip()
         if t:
             self.turns.append(Turn("user", t, self._now()))
@@ -37,22 +43,12 @@ class Scratchpad:
     def add_assistant(self, text: str) -> None:
         """Append an assistant turn.
 
-        Called by `pipeline.flush` (after a successful Gemini reply),
-        `pipeline._handle_tool_call` (bridge open/fail acks),
-        `pipeline.on_service_ping` (announcement + bridge ack),
-        `pipeline._on_bridge_remote_close` (disconnect notice).
+        Called by `pipeline._mirror_to_scratchpad` (mirroring LLMContext writes)
+        and `pipeline.add_assistant_announcement` (bridge/service-ping notices).
         """
         t = (text or "").strip()
         if t:
             self.turns.append(Turn("assistant", t, self._now()))
-
-    def history_messages(self) -> list[dict]:
-        """Return prior turns as Gemini-style messages (no system prompt, no current turn).
-
-        Called by `pipeline.flush` *before* `scratchpad.add_user(text)` so the snapshot
-        excludes the current user turn; `gemini_reply` appends it itself.
-        """
-        return [{"role": t.role, "content": t.text} for t in self.turns]
 
     def render(self) -> str:
         if not self.turns:

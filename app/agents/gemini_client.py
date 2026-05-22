@@ -34,26 +34,38 @@ def _messages_to_contents(messages):
 
 
 def _openai_tools_to_gemini(tools):
-    """Convert OpenAI-style tool definitions to Gemini Tool list."""
+    """Convert OpenAI-style tool definitions to Gemini Tool list.
+
+    Two shapes are accepted:
+      * ``{"type": "function", "function": {...}}`` → a ``Tool`` carrying a
+        ``FunctionDeclaration`` Gemini can call back into our code with.
+      * ``{"type": "google_search"}`` → ``Tool(google_search=GoogleSearch())``
+        for Gemini's built-in search grounding. No function call is emitted;
+        Gemini executes the search server-side and inlines the results.
+    """
     if not tools:
         return None
     gemini_tools = []
     for t in tools:
-        if t.get("type") != "function" or "function" not in t:
-            continue
-        fn = t["function"]
-        params = fn.get("parameters") or {}
-        gemini_tools.append(
-            types.Tool(
-                function_declarations=[
-                    types.FunctionDeclaration(
-                        name=fn.get("name", "function"),
-                        description=fn.get("description") or "",
-                        parameters=params,
-                    )
-                ]
+        tool_type = t.get("type")
+        if tool_type == "function" and "function" in t:
+            fn = t["function"]
+            params = fn.get("parameters") or {}
+            gemini_tools.append(
+                types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(
+                            name=fn.get("name", "function"),
+                            description=fn.get("description") or "",
+                            parameters=params,
+                        )
+                    ]
+                )
             )
-        )
+        elif tool_type == "google_search":
+            gemini_tools.append(types.Tool(google_search=types.GoogleSearch()))
+        # Unknown types are silently ignored — keeps the converter
+        # forward-compatible with new tool shapes added later.
     return gemini_tools if gemini_tools else None
 
 
@@ -89,8 +101,19 @@ def call_gemini(messages, tools=None, tool_choice="any"):
     gemini_tools = _openai_tools_to_gemini(tools)
     if gemini_tools:
         mode = _FUNCTION_CALLING_MODES.get(tool_choice, types.FunctionCallingConfigMode.ANY)
+        # When function-calling tools and server-side tools (e.g. google_search
+        # grounding) are mixed in the same request, the API requires
+        # include_server_side_tool_invocations=True on the tool_config.
+        # Without it Gemini rejects with INVALID_ARGUMENT. Safe to always
+        # enable — it has no effect when only function tools are declared.
+        has_server_side_tool = any(
+            (t or {}).get("type") == "google_search" for t in (tools or [])
+        )
         config_kw["tools"] = gemini_tools
-        config_kw["tool_config"] = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode=mode))  # type: ignore
+        config_kw["tool_config"] = types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(mode=mode),
+            include_server_side_tool_invocations=has_server_side_tool or None,
+        )  # type: ignore
 
     config = types.GenerateContentConfig(**config_kw) if config_kw else None
     if config:

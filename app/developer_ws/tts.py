@@ -1,26 +1,40 @@
-"""Piper text-to-speech.
+"""Piper text-to-speech, streaming.
 
-`synthesize_speech_pcm24(text)` returns int16 mono PCM at the downlink sample rate
-(24 kHz), resampling from Piper's native rate. Returned bytes are queued on
-`AudioIO` for Opus encoding and downlink delivery.
+Two entry points share one underlying implementation:
 
-Piper is cross-platform (Windows / Linux / macOS) and uses the same `.onnx` voice
-file everywhere, so local and deployed runs sound identical.
+  * ``synthesize_speech_pcm24_stream(text)`` — async generator yielding PCM
+    chunks at the downlink sample rate (24 kHz, int16 mono) **as Piper
+    produces them**. Piper emits one chunk per sentence, so the first audio
+    arrives ~150–400 ms after the call starts instead of waiting for the
+    entire synthesis to complete.
+  * ``synthesize_speech_pcm24(text)`` — convenience that collects the stream
+    into a single ``bytes``. Same audio, just buffered.
+
+The streaming path is what ``PiperTTSProcessor`` uses post-refactor; the
+batch wrapper exists for any caller that still wants a one-shot interface.
+
+Piper inference is blocking C++/ONNX, so synthesis runs on a worker thread
+via ``asyncio.to_thread`` and pushes finished chunks through an
+``asyncio.Queue`` (via ``loop.call_soon_threadsafe``). Resampler state from
+``audioop.ratecv`` is threaded across chunks so sentence boundaries don't
+produce phase glitches.
 
 Voice path resolution:
   1. ``PIPER_MODEL_PATH`` env var (relative paths resolve from CWD).
   2. Default: ``piper_voices/en_US-amy-medium.onnx`` relative to repo root.
+
+Piper is cross-platform (Windows / Linux / macOS) and uses the same ``.onnx``
+voice file everywhere, so local and deployed runs sound identical.
 """
 
 from __future__ import annotations
 
 import asyncio
 import audioop
-import io
 import logging
 import os
 import threading
-import wave
+from typing import AsyncIterator
 
 from audio_codec import DOWNLINK_SAMPLE_RATE
 
@@ -65,54 +79,96 @@ def _load_voice():
             return None
 
 
-def _synthesize_sync(text: str) -> bytes:
-    """Render text via Piper, return mono int16 PCM at DOWNLINK_SAMPLE_RATE."""
-    t = text.strip()
-    if not t:
-        return b""
-    voice = _load_voice()
-    if voice is None:
-        log.warning("piper voice unavailable; TTS disabled.")
-        return b""
-    try:
-        # Piper writes a WAV header + PCM into the wave.Wave_write. Sample rate
-        # comes from the voice's config; we resample to DOWNLINK_SAMPLE_RATE.
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wav:
-            voice.synthesize_wav(t, wav)
-        buf.seek(0)
-        with wave.open(buf, "rb") as wf:
-            channels = wf.getnchannels()
-            rate = wf.getframerate()
-            sample_width = wf.getsampwidth()
-            pcm = wf.readframes(wf.getnframes())
-    except Exception as e:
-        log.warning("piper synthesize failed: %s", e)
-        return b""
-
-    if sample_width != 2:
-        log.warning("piper produced %d-bit audio; expected 16-bit", sample_width * 8)
-        return b""
-    if channels == 2:
-        pcm = audioop.tomono(pcm, 2, 0.5, 0.5)
-    elif channels != 1:
-        return b""
-    if rate == DOWNLINK_SAMPLE_RATE:
-        return pcm
-    resampled, _ = audioop.ratecv(pcm, 2, 1, rate, DOWNLINK_SAMPLE_RATE, None)
-    return resampled
-
-
 async def preload_piper_voice() -> None:
     """Warm the Piper voice cache so the first TTS call doesn't stall (~1-2s)."""
     await asyncio.to_thread(_load_voice)
 
 
-async def synthesize_speech_pcm24(text: str) -> bytes:
-    """Synthesize speech and return int16 mono PCM at the downlink sample rate.
+# Sentinel for "stream ended" pushed onto the queue by the worker.
+_END = object()
 
-    Called by: `pipeline._speak` after Gemini returns plain text, after a tool ack,
-    after a service-ping announcement, and on bridge remote-close notification.
-    Offloaded to a worker thread because Piper inference is CPU-bound.
+
+async def synthesize_speech_pcm24_stream(text: str) -> AsyncIterator[bytes]:
+    """Synthesize speech, yielding 24 kHz int16 mono PCM chunks as Piper produces them.
+
+    Piper emits one chunk per sentence (see ``PiperVoice.synthesize`` docstring).
+    For a multi-sentence reply, this means the first sentence's audio arrives
+    while the second is still being synthesized — true pipeline parallelism
+    between TTS and downlink transmission.
+
+    Called by: ``PiperTTSProcessor._speak`` in ``pipecat_bits.py`` for every
+    ``TextFrame`` (LLM output) and ``TTSSpeakFrame`` (tool handlers, bridge
+    ``say`` path, service-ping announcements).
+
+    Yields nothing if the model is unavailable, the text is empty, or
+    synthesis fails — callers should handle a 0-chunk stream as a no-op.
     """
-    return await asyncio.to_thread(_synthesize_sync, text)
+    t = (text or "").strip()
+    if not t:
+        return
+    voice = _load_voice()
+    if voice is None:
+        log.warning("piper voice unavailable; TTS disabled.")
+        return
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _worker() -> None:
+        """Run Piper synthesis in a worker thread, push chunks onto the queue.
+
+        Uses ``call_soon_threadsafe`` because ``asyncio.Queue`` is not
+        thread-safe from outside the loop.
+        """
+        resample_state = None
+        try:
+            for chunk in voice.synthesize(t):
+                pcm = chunk.audio_int16_bytes
+                rate = chunk.sample_rate
+                channels = chunk.sample_channels
+                if channels == 2:
+                    pcm = audioop.tomono(pcm, 2, 0.5, 0.5)
+                elif channels != 1:
+                    log.warning("piper produced %d channels; skipping chunk", channels)
+                    continue
+                if rate != DOWNLINK_SAMPLE_RATE:
+                    pcm, resample_state = audioop.ratecv(
+                        pcm, 2, 1, rate, DOWNLINK_SAMPLE_RATE, resample_state
+                    )
+                if pcm:
+                    loop.call_soon_threadsafe(queue.put_nowait, pcm)
+        except BaseException as e:  # surface exceptions to the async side
+            loop.call_soon_threadsafe(queue.put_nowait, e)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _END)
+
+    worker_task = asyncio.create_task(asyncio.to_thread(_worker))
+
+    try:
+        while True:
+            item = await queue.get()
+            if item is _END:
+                return
+            if isinstance(item, BaseException):
+                log.warning("piper synthesize failed: %s", item)
+                return
+            yield item
+    finally:
+        # Ensure the worker is reaped (the thread will exit on its own once
+        # the generator is done; awaiting binds the task back into this loop).
+        try:
+            await worker_task
+        except Exception:
+            log.exception("piper worker task raised")
+
+
+async def synthesize_speech_pcm24(text: str) -> bytes:
+    """Batch convenience: collect the streaming synthesis into a single PCM blob.
+
+    Kept for callers that want a one-shot interface; the streaming generator
+    is the canonical entry point.
+    """
+    parts: list[bytes] = []
+    async for chunk in synthesize_speech_pcm24_stream(text):
+        parts.append(chunk)
+    return b"".join(parts)

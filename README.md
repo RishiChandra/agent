@@ -30,22 +30,20 @@ Bash equivalent: ```. .venv/Scripts/activate``` (Git Bash on Windows) or ```sour
 ### 2. Vosk STT model (~68 MB, gitignored)
 
 ```bash
-curl -L -o vosk-model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
-python -c "import zipfile; zipfile.ZipFile('vosk-model.zip').extractall('.')"
-rm vosk-model.zip
+python scripts/setup_vosk_model.py
 ```
 
-Sanity check: ```vosk-model-small-en-us-0.15/am/final.mdl``` must exist.
+The script idempotently downloads and unpacks ```vosk-model-small-en-us-0.15``` at the repo root — matches the path checked by ```azure-deploy.sh``` preflight, so no env var change is needed locally. Pick a different model with ```--model <name>``` (see [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)). Sanity check: ```vosk-model-small-en-us-0.15/am/final.mdl``` must exist.
 
 ### 3. Piper TTS voice (~60 MB, gitignored)
 
 Cross-platform neural TTS. Same ```.onnx``` voice file is used by the local server **and** the deployed server, so both sound identical.
 
 ```bash
-mkdir -p piper_voices
-curl -L -o piper_voices/en_US-amy-medium.onnx       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx
-curl -L -o piper_voices/en_US-amy-medium.onnx.json  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
+python scripts/setup_piper_voice.py
 ```
+
+The script idempotently downloads ```en_US-amy-medium``` into ```piper_voices/``` — matches the default in ```app/developer_ws/tts.py``` so no env var change is needed locally. Pick a different voice with ```--voice <id>``` (see [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)).
 
 ### 4. Windows: install Opus native library
 
@@ -206,5 +204,43 @@ You can also test the task reminder feature by running  ```python test/app/test_
 
 You can see the current Task Queue for the Service Bus on the Azure Portal:
 <img width="2560" height="1271" alt="screencapture-portal-azure-2025-12-07-17_27_29" src="https://github.com/user-attachments/assets/2d820d6c-1b2e-470c-ae72-aa097f54bb2a" />
+
+
+## Improvements Needed
+
+Three known latency wins for the deployed voice loop. Baseline (measured ```2026-05-22``` against B1, ```"hello can you hear me"```): ~9 s from stopped-talking to first audio out. Breakdown: 2.0 s silence timer + 3.3 s Vosk STT + 1.7 s Gemini + 1.6 s Piper TTS first chunk + ~200 ms downlink coalesce.
+
+### 1. App Service SKU upgrade: B1 → P1 v3
+
+The biggest single fix. B1 is a burstable shared 1 vCPU, throttled under sustained inference load. P1 v3 is **2 dedicated Dv4-class vCPUs**, no throttling, ~2–3× CPU throughput for ONNX models.
+
+Expected impact: STT 3.3 s → ~1.0–1.4 s, Piper first-chunk 1.6 s → ~500–700 ms. **~2.5 s shaved.**
+
+Change ```SKU="B1"``` → ```SKU="P1V3"``` in [```azure-deploy.sh```](azure-deploy.sh) and redeploy. Cost: ~$12/mo → ~$113/mo (westus2 Linux, per [Azure retail prices API](price_check.py)). Skip S1 in the middle — same single vCPU as B1, only adds features (slots, custom domains), not perf.
+
+### 2. Lower the end-of-utterance silence timer
+
+```DEVELOPER_WS_END_SILENCE_SEC``` currently defaults to ```2.0```. Set it to ```1.0``` (or even ```0.7```) in App Settings to shave that off every turn.
+
+Expected impact: ~1.0 s shaved.
+
+Trade-off: slow speakers or natural mid-thought pauses get cut off. Easy to A/B — set in Azure Portal → Configuration → Application Settings without redeploying.
+
+### 3. Streaming Gemini (token / sentence)
+
+Today [```CustomGeminiLLMService._call_gemini```](app/developer_ws/pipecat_llm.py) does a blocking ```generate_content``` and waits for the full response before any token reaches Piper. Switching to ```generate_content_stream``` lets us aggregate text per sentence and start Piper synthesis on sentence 1 while Gemini is still generating sentence 2/3.
+
+Expected impact: ~500–1500 ms shaved on multi-sentence replies (compounds with the streaming TTS we already shipped — see [```tts.py```](app/developer_ws/tts.py) ```synthesize_speech_pcm24_stream```).
+
+Implementation:
+1. Replace the ```call_gemini``` thread call in ```_call_gemini``` with an async iterator over ```client.aio.models.generate_content_stream(...)```.
+2. Buffer streaming text until a sentence boundary (```.```, ```?```, ```!```), then push an ```LLMTextFrame``` for that sentence. ```PiperTTSProcessor``` already handles one-text-frame-per-sentence cleanly.
+3. Function calls still need to be aggregated to completion before dispatch (they can arrive across multiple chunks).
+
+This is the most invasive of the three but the only one that can take per-reply latency below P1 v3's CPU floor.
+
+### Stacking estimate
+
+With all three: ~9 s → **~3 s** stopped-talking → first audio. Closer to feeling conversational.
 
 
