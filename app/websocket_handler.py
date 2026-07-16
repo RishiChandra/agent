@@ -119,6 +119,38 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         msg = await websocket.receive_text()
                         data = json.loads(msg)
 
+                        # Bridge handshake: the developer_ws orchestrator dials this
+                        # endpoint as a registered agent and sends {"type":"hello"},
+                        # then waits (~5s) for an ack before relaying any audio — see
+                        # developer_ws/BRIDGE_PROTOCOL.md. Ack immediately and switch
+                        # the downlink to raw PCM: the bridge peer plays `audio`
+                        # payloads as PCM and cannot decode Opus TLV.
+                        if data.get("type") == "hello":
+                            audio_manager.disable_downlink_opus()
+                            await websocket.send_text(json.dumps({
+                                "type": "ack",
+                                "accept": True,
+                                "service_id": "kairos",
+                                "version": "1",
+                            }))
+                            print(f"🤝 Bridge hello acked user_id={user_id} (downlink=PCM)")
+                            continue
+
+                        # Bridge teardown: the orchestrator ends the relay on purpose
+                        # (user said stop / session closed). Raise instead of return:
+                        # a bare return leaves the sibling TaskGroup tasks (and the
+                        # Gemini Live session) running as zombies that hold concurrent-
+                        # session quota until Google aborts them (1008) — which can kill
+                        # OTHER live sessions mid-conversation. Raising cancels the
+                        # TaskGroup, exiting the Gemini context manager immediately.
+                        if data.get("type") == "bye":
+                            print(f"👋 Bridge bye user_id={user_id} reason={data.get('reason', '')!r}")
+                            try:
+                                await websocket.close()
+                            except Exception:
+                                pass
+                            raise WebSocketDisconnect(code=1000)
+
                         if data.get("text") is not None:
                             print(f"[DEBUG] Received text (top-level) user_id={user_id} text={data.get('text')!r}")
 

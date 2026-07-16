@@ -49,7 +49,7 @@ from audio_codec import DOWNLINK_SAMPLE_RATE, UPLINK_SAMPLE_RATE
 
 from .audio_io import AudioIO
 from .bridge import RemoteAudioBridge
-from .stt import transcribe_pcm16
+from .stt import StreamingTranscriber
 from .tts import synthesize_speech_pcm24_stream
 
 log = logging.getLogger("developer_ws")
@@ -98,51 +98,51 @@ class BridgeGateProcessor(FrameProcessor):
 
 
 class VoskUtteranceSTTProcessor(FrameProcessor):
-    """Vosk-backed utterance STT.
+    """Vosk-backed utterance STT, streaming.
 
-    Accumulates `InputAudioRawFrame` audio between `UserStartedSpeakingFrame` and
-    `UserStoppedSpeakingFrame`. On stop, runs Vosk in a worker thread, emits a
-    `TranscriptionFrame`. Audio is also passed through downstream during accumulation
-    so other processors (e.g. metrics) can observe it.
-
-    Vosk is one-shot; we don't try to stream partials. The latency win in this swap
-    comes from streaming LLM→TTS, not from streaming STT.
+    Feeds `InputAudioRawFrame` audio into an incremental Vosk recognizer between
+    `UserStartedSpeakingFrame` and `UserStoppedSpeakingFrame`, so decode work
+    happens *while the user talks*. On stop, only the finalize step remains
+    (~pad + FinalResult), which turns the old multi-second post-utterance STT
+    stall into tens of milliseconds.
     """
 
     def __init__(self, *, user_id: str = "", sample_rate: int = UPLINK_SAMPLE_RATE, **kwargs) -> None:
         super().__init__(**kwargs)
         self._user_id = user_id
         self._sample_rate = sample_rate
-        self._buf = bytearray()
+        self._stt: StreamingTranscriber | None = None
+        self._fed_bytes = 0
         self._capturing = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
         if isinstance(frame, UserStartedSpeakingFrame):
-            self._buf.clear()
+            self._stt = StreamingTranscriber(self._sample_rate)
+            self._fed_bytes = 0
             self._capturing = True
             await self.push_frame(frame, direction)
             return
 
         if isinstance(frame, UserStoppedSpeakingFrame):
             self._capturing = False
-            pcm = bytes(self._buf)
-            self._buf.clear()
+            stt, self._stt = self._stt, None
+            fed = self._fed_bytes
             # Push the stop frame downstream first so any aggregator sees it.
             await self.push_frame(frame, direction)
-            if not pcm:
+            if stt is None or not fed:
                 return
             t_stt = time.monotonic()
             try:
-                text = await transcribe_pcm16(pcm, self._sample_rate)
+                text = await stt.finalize()
             except Exception:
-                log.exception("vosk transcribe failed user_id=%s", self._user_id)
+                log.exception("vosk finalize failed user_id=%s", self._user_id)
                 return
             stt_ms = int((time.monotonic() - t_stt) * 1000)
             log.info(
-                "user_id=%s transcript=%r (pcm=%dB ~%.2fs) stt_ms=%d",
-                self._user_id, text, len(pcm), len(pcm) / (2 * self._sample_rate),
+                "user_id=%s transcript=%r (pcm=%dB ~%.2fs) finalize_ms=%d",
+                self._user_id, text, fed, fed / (2 * self._sample_rate),
                 stt_ms,
             )
             if text and text.strip():
@@ -157,8 +157,12 @@ class VoskUtteranceSTTProcessor(FrameProcessor):
             return
 
         if isinstance(frame, InputAudioRawFrame):
-            if self._capturing and frame.audio:
-                self._buf.extend(frame.audio)
+            if self._capturing and frame.audio and self._stt is not None:
+                self._fed_bytes += len(frame.audio)
+                try:
+                    await self._stt.feed(frame.audio)
+                except Exception:
+                    log.exception("vosk feed failed user_id=%s", self._user_id)
             # Don't push raw audio downstream — Vosk has consumed it. Keeps
             # the pipeline clean of frames the LLM/TTS don't care about.
             return

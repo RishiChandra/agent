@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Registry</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>🎙️ Agent Registry</h1>
+    <nav>
+      <a href="index.html" class="active">Register</a>
+      <a href="test.html">Test orchestrator</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="grid">
+      <!-- ===== Register / edit form ===== -->
+      <section class="card">
+        <h2 id="form-title">Register an agent</h2>
+        <form id="agent-form" autocomplete="off">
+          <input type="hidden" id="agent-id" />
+
+          <label for="name">Name *</label>
+          <input id="name" required placeholder="Weather Bot" />
+          <div class="hint">Users reach your agent by speaking this name to the orchestrator.</div>
+
+          <label for="description">Description *</label>
+          <textarea id="description" placeholder="Answers questions about the weather for any city."></textarea>
+          <div class="hint">Helps the orchestrator decide when to route to your agent.</div>
+
+          <label for="url">Bridge URL *</label>
+          <input id="url" required placeholder="wss://your-service.trycloudflare.com/relay" />
+          <div class="hint">The WebSocket URL the orchestrator dials (your relay service's public URL).</div>
+
+          <label for="keywords">Keywords</label>
+          <input id="keywords" placeholder="weather, forecast, temperature" />
+          <div class="hint">Comma-separated. Words the orchestrator matches against to pick your agent.</div>
+
+          <label for="capabilities">Capabilities</label>
+          <textarea id="capabilities" placeholder="report the current weather for a city&#10;give a 5-day forecast"></textarea>
+          <div class="hint">One per line — what your agent can do.</div>
+
+          <label for="user_intents">Example user intents</label>
+          <textarea id="user_intents" placeholder="What's the weather in Boston?&#10;Will it rain tomorrow?"></textarea>
+          <div class="hint">One per line — phrases a user might say to reach your agent.</div>
+
+          <div class="row">
+            <div>
+              <label for="service_id">Service ID</label>
+              <input id="service_id" placeholder="weather-bot-3a7f (optional)" />
+            </div>
+            <div>
+              <label for="version">Version</label>
+              <input id="version" value="1" />
+            </div>
+          </div>
+
+          <div class="actions">
+            <button type="submit" id="submit-btn">Register agent</button>
+            <button type="button" class="secondary" id="reset-btn" style="display:none">Cancel edit</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- ===== Registered agents list ===== -->
+      <section class="card">
+        <h2>Registered agents <span id="count" class="muted"></span></h2>
+        <div id="list"><div class="empty">Loading…</div></div>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const listEl = $("list");
+    const countEl = $("count");
+
+    // The site is deployable independently of the orchestrator, so decide
+    // where the API lives: same-origin when the orchestrator itself serves us
+    // (localhost dev or the Azure app), otherwise the deployed orchestrator.
+    // Override anywhere with ?api=http://localhost:8000
+    const ORCHESTRATOR = "https://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net";
+    const API_BASE = (() => {
+      const q = new URLSearchParams(location.search).get("api");
+      if (q) return q.replace(/\/+$/, "");
+      const h = location.hostname;
+      if (h === "localhost" || h === "127.0.0.1") return "";
+      if (ORCHESTRATOR.includes(h) && h) return "";
+      return ORCHESTRATOR;
+    })();
+
+    function toast(msg, isErr) {
+      const t = $("toast");
+      t.textContent = msg;
+      t.className = "toast show" + (isErr ? " err" : "");
+      setTimeout(() => (t.className = "toast"), 2600);
+    }
+
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    }
+
+    async function api(path, opts) {
+      const res = await fetch(API_BASE + path, opts);
+      let body = null;
+      try { body = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error((body && body.detail) || res.statusText);
+      return body;
+    }
+
+    async function loadAgents() {
+      try {
+        const { agents } = await api("/api/agents");
+        countEl.textContent = agents.length ? `(${agents.length})` : "";
+        if (!agents.length) {
+          listEl.innerHTML = '<div class="empty">No agents registered yet.</div>';
+          return;
+        }
+        listEl.innerHTML = agents.map(renderAgent).join("");
+      } catch (e) {
+        listEl.innerHTML = `<div class="empty">Could not load agents: ${esc(e.message)}</div>`;
+      }
+    }
+
+    function renderAgent(a) {
+      const srcBadge = a.source === "self"
+        ? '<span class="badge self">self-registered</span>'
+        : '<span class="badge">web</span>';
+      const inactive = a.active ? "" : '<span class="badge inactive">inactive</span>';
+      return `
+        <div class="agent">
+          <div class="top">
+            <span class="name">${esc(a.name)}</span>
+            ${srcBadge}${inactive}
+          </div>
+          ${a.description ? `<div class="desc">${esc(a.description)}</div>` : ""}
+          <div class="url">${esc(a.url)}</div>
+          ${(a.keywords && a.keywords.length) ? `<div class="hint" style="margin-top:6px">🔑 ${a.keywords.map(esc).join(", ")}</div>` : ""}
+          <div class="foot">
+            ${a.service_id ? `<span class="hint">id: ${esc(a.service_id)} · v${esc(a.version)}</span>` : `<span class="hint">v${esc(a.version)}</span>`}
+            <span class="spacer"></span>
+            <button class="secondary" onclick='editAgent(${JSON.stringify(JSON.stringify(a))})'>Edit</button>
+            <button class="danger" onclick="deleteAgent('${a.id}', '${esc(a.name)}')">Delete</button>
+          </div>
+        </div>`;
+    }
+
+    function fillForm(a) {
+      $("agent-id").value = a.id || "";
+      $("name").value = a.name || "";
+      $("description").value = a.description || "";
+      $("url").value = a.url || "";
+      $("keywords").value = (a.keywords || []).join(", ");
+      $("capabilities").value = (a.capabilities || []).join("\n");
+      $("user_intents").value = (a.user_intents || []).join("\n");
+      $("service_id").value = a.service_id || "";
+      $("version").value = a.version || "1";
+      const editing = !!a.id;
+      $("form-title").textContent = editing ? "Edit agent" : "Register an agent";
+      $("submit-btn").textContent = editing ? "Save changes" : "Register agent";
+      $("reset-btn").style.display = editing ? "inline-block" : "none";
+    }
+
+    function resetForm() {
+      fillForm({ version: "1" });
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    window.editAgent = (json) => { fillForm(JSON.parse(json)); window.scrollTo({ top: 0, behavior: "smooth" }); };
+
+    window.deleteAgent = async (id, name) => {
+      if (!confirm(`Delete agent "${name}"?`)) return;
+      try {
+        await api(`/api/agents/${id}`, { method: "DELETE" });
+        toast("Agent deleted");
+        loadAgents();
+      } catch (e) { toast(e.message, true); }
+    };
+
+    $("reset-btn").addEventListener("click", resetForm);
+
+    const splitLines = (s) => s.split("\n").map((x) => x.trim()).filter(Boolean);
+    const splitCsv = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
+
+    $("agent-form").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const payload = {
+        name: $("name").value.trim(),
+        description: $("description").value.trim(),
+        url: $("url").value.trim(),
+        keywords: splitCsv($("keywords").value),
+        capabilities: splitLines($("capabilities").value),
+        user_intents: splitLines($("user_intents").value),
+        service_id: $("service_id").value.trim() || null,
+        version: $("version").value.trim() || "1",
+      };
+      const id = $("agent-id").value;
+      try {
+        if (id) {
+          await api(`/api/agents/${id}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          toast("Agent updated");
+        } else {
+          await api("/api/agents", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          toast("Agent registered");
+        }
+        resetForm();
+        loadAgents();
+      } catch (e) { toast(e.message, true); }
+    });
+
+    loadAgents();
+  </script>
+</body>
+</html>

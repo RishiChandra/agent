@@ -137,11 +137,22 @@ async def _handle_audio(
     pcm = _decode_audio_payload(data, user_id, audio)
 
     if bridge.active:
+        utterance.reset_barge_in()
         if pcm:
             await bridge.send_uplink_pcm(pcm)
         return
 
     if pcm:
+        # Barge-in: the user talking over the bot interrupts it. Runs before
+        # feed so the cancel lands ahead of this batch; the pipeline then
+        # treats the continuing speech as a fresh utterance.
+        if audio.is_bot_audible():
+            if utterance.barge_in_hit(pcm):
+                log.info("barge-in user_id=%s — interrupting bot mid-speech", user_id)
+                await pipeline.interrupt()
+                await audio.interrupt()
+        else:
+            utterance.reset_barge_in()
         await pipeline.feed_audio(pcm)
 
     if data.get("turn_complete") is True:

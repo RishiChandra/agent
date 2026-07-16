@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import urllib.parse
 from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket
@@ -62,12 +63,79 @@ from .pipecat_bits import (
     SessionSource,
     VoskUtteranceSTTProcessor,
 )
-from .pipecat_llm import CustomGeminiLLMService
+from .pipecat_llm import CustomGeminiLLMService, _DEFAULT_SYSTEM
 from .scratchpad import Scratchpad
 from .tools import ALL_TOOLS, END_CONVERSATION, START_REMOTE_AUDIO_BRIDGE
 from .utterance import UtteranceBuffer
 
+import agents_registry
+
 log = logging.getLogger("developer_ws")
+
+
+def build_developer_system_instruction() -> str:
+    """Base system prompt plus the current list of registered agents.
+
+    The base is the env override (`DEVELOPER_GEMINI_SYSTEM_INSTRUCTION`) or the
+    default in `pipecat_llm`. We append the active agents so Gemini knows which
+    names it may pass as the `agent` argument to `start_remote_audio_bridge`.
+    Snapshotted once per session (at pipeline construction); agents registered
+    mid-call are picked up on the next session.
+    """
+    base = os.environ.get("DEVELOPER_GEMINI_SYSTEM_INSTRUCTION", "").strip() or _DEFAULT_SYSTEM
+    try:
+        agents = agents_registry.list_agents(active_only=True)
+    except Exception:
+        log.exception("could not load agents for system prompt; using base only")
+        agents = []
+    if not agents:
+        return base
+    lines = [
+        "\n\nRegistered agents you can bridge to via start_remote_audio_bridge "
+        "(pass the exact name as the `agent` argument):",
+    ]
+    for a in agents:
+        name = (a.get("name") or "").strip()
+        if not name:
+            continue
+        desc = (a.get("description") or "").strip()
+        lines.append(f"- {name}: {desc}" if desc else f"- {name}")
+    lines.append(
+        "When the user asks to reach one of these by name, pass that name as `agent`. "
+        "If they just say 'call the service' without naming one, omit `agent`. "
+        "IMPORTANT: the transcript comes from imperfect speech-to-text that garbles "
+        "names not in its vocabulary — e.g. 'Kairos' may arrive as 'cut in', 'cairo's', "
+        "or 'kai ross'. If any part of the request sounds like one of the registered "
+        "agent names above, or the described purpose matches one agent's description, "
+        "treat it as that agent and pass the REGISTERED name (never the garbled text) "
+        "as `agent`."
+    )
+    return base + "\n".join(lines)
+
+
+def _resolve_bridge_url(selector: str = "", user_id: str = "") -> str:
+    """Map an agent name/service_id to its bridge URL, or the env default.
+
+    Falls back to `REMOTE_BRIDGE_URL` when the selector is empty or matches no
+    registered agent, preserving the original single-endpoint behaviour.
+
+    Registered URLs may contain a literal ``{user_id}`` placeholder (e.g.
+    ``wss://host/ws/{user_id}``); it is replaced with the caller's user id so
+    the remote session runs as the real user.
+    """
+    sel = (selector or "").strip()
+    url = ""
+    if sel:
+        url = agents_registry.resolve_bridge_url(sel) or ""
+        if url:
+            log.info("bridge target resolved selector=%r -> %s", sel, url)
+        else:
+            log.info("bridge target selector=%r unmatched; using default", sel)
+    if not url:
+        url = REMOTE_BRIDGE_URL
+    if user_id and "{user_id}" in url:
+        url = url.replace("{user_id}", urllib.parse.quote(user_id, safe=""))
+    return url
 
 _BRIDGE_ACK = "Connecting you to the remote service now."
 _BRIDGE_FAIL_GENERIC = "Sorry, I couldn't open the remote connection."
@@ -135,6 +203,7 @@ class SpeechPipeline:
         # so we don't pass `tools_schema=` here.
         self._llm = CustomGeminiLLMService(
             user_id=user_id,
+            system_instruction=build_developer_system_instruction(),
             on_message_added=self._mirror_to_scratchpad,
         )
         self._register_tools(ALL_TOOLS)
@@ -247,7 +316,11 @@ class SpeechPipeline:
         async with self._announce_lock:
             self._llm.add_assistant_announcement(_SERVICE_PING_ANNOUNCE)
             await self._task.queue_frame(TTSSpeakFrame(_SERVICE_PING_ANNOUNCE))
-            result = await self._bridge.start(REMOTE_BRIDGE_URL)
+            # A ping names its service_id; dial that agent's registered URL if we
+            # have one, else the env default.
+            result = await self._bridge.start(
+                _resolve_bridge_url(service_id, user_id=self._user_id)
+            )
             log.info(
                 "user_id=%s ping->bridge result ok=%s outcome=%s detail=%r service_id=%s",
                 self._user_id, result.ok, result.outcome, result.detail,
@@ -377,8 +450,11 @@ class SpeechPipeline:
         await params.llm.push_frame(TTSSpeakFrame(_BRIDGE_ACK))
         self._llm.add_assistant_announcement(_BRIDGE_ACK)
 
-        # 2. Side effect.
-        result = await self._bridge.start(REMOTE_BRIDGE_URL)
+        # 2. Side effect — dial the agent the user named, or the env default.
+        agent_selector = str(params.arguments.get("agent") or "").strip()
+        result = await self._bridge.start(
+            _resolve_bridge_url(agent_selector, user_id=self._user_id)
+        )
         log.info(
             "user_id=%s bridge start result ok=%s outcome=%s detail=%r",
             self._user_id, result.ok, result.outcome, result.detail,

@@ -52,6 +52,72 @@ async def preload_vosk_model() -> None:
     await asyncio.to_thread(_load_model_sync)
 
 
+class StreamingTranscriber:
+    """Incremental Vosk recognizer for one utterance.
+
+    Feed audio as it arrives with `feed(pcm)` (decode work happens while the
+    user is still talking), then call `finalize()` at end-of-utterance for the
+    text. This replaces transcribing the whole buffer after the user stops —
+    on a slow CPU that single-shot decode ran at ~0.5x real-time, adding
+    seconds of dead air per turn.
+
+    One instance per utterance; not reusable after `finalize()`. All decoder
+    calls are offloaded to worker threads; callers must await them one at a
+    time (the pipeline's single-task frame loop already guarantees this).
+    """
+
+    def __init__(self, sample_rate: int) -> None:
+        self._sr = int(sample_rate)
+        self._rec = None
+        self._failed = False
+
+    def _ensure_rec_sync(self):
+        if self._rec is None and not self._failed:
+            model = _load_model_sync()
+            if model is None:
+                self._failed = True
+                log.warning(
+                    "VOSK_MODEL_PATH not set or invalid; STT disabled. "
+                    "Point it at an unpacked Vosk model directory."
+                )
+                return None
+            try:
+                from vosk import KaldiRecognizer
+            except ImportError:
+                self._failed = True
+                return None
+            self._rec = KaldiRecognizer(model, self._sr)
+        return self._rec
+
+    def _feed_sync(self, pcm: bytes) -> None:
+        rec = self._ensure_rec_sync()
+        if rec is None or not pcm:
+            return
+        if len(pcm) % 2:
+            pcm = pcm[:-1]
+        rec.AcceptWaveform(pcm)
+
+    async def feed(self, pcm: bytes) -> None:
+        """Push one audio chunk into the recognizer (worker thread)."""
+        await asyncio.to_thread(self._feed_sync, pcm)
+
+    def _finalize_sync(self) -> str:
+        rec = self._rec
+        if rec is None:
+            return ""
+        # Trailing zeros help the decoder finalize the last word.
+        pad_ms = int(os.environ.get("VOSK_END_PAD_MS", "400"))
+        rec.AcceptWaveform(b"\x00" * (int(self._sr * pad_ms / 1000) * 2))
+        try:
+            return (json.loads(rec.FinalResult()).get("text") or "").strip()
+        except json.JSONDecodeError:
+            return ""
+
+    async def finalize(self) -> str:
+        """Flush the decoder and return the utterance text (worker thread)."""
+        return await asyncio.to_thread(self._finalize_sync)
+
+
 def _transcribe_sync(pcm: bytes, sample_rate: int) -> str:
     sr = int(sample_rate)
     # Below ~80 ms the recognizer can't produce a stable result.

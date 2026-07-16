@@ -47,6 +47,14 @@ class AudioManager:
     ) -> bytes:
         return self._uplink_decoder.decode_tlv(tlv, sample_rate, frame_samples)
 
+    def disable_downlink_opus(self) -> None:
+        """Send downlink audio as raw PCM instead of Opus TLV.
+
+        Called when the peer is the developer_ws bridge (server-to-server relay):
+        it plays `{"audio": <b64>}` payloads as raw PCM and can't decode Opus.
+        """
+        self._downlink.disable()
+
     def add_audio(self, audio_data):
         self._turn_active = True
         rms = rms_int16_le(audio_data)

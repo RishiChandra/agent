@@ -31,12 +31,14 @@ START_REMOTE_AUDIO_BRIDGE_TOOL = {
     "function": {
         "name": START_REMOTE_AUDIO_BRIDGE,
         "description": (
-            "Open a direct audio relay to a remote server. Once this returns successfully, "
-            "the user's microphone audio is forwarded to that remote and the remote's audio "
-            "responses are played back to the user without going through this assistant. "
-            "Call this when the user says any of: 'call the service', 'call the server', "
-            "'call the remote', 'connect to the service/remote/operator', 'dial the service', "
-            "'hand off to the remote/operator', or anything clearly equivalent in intent."
+            "Open a direct audio relay to a registered agent (remote server). Once this "
+            "returns successfully, the user's microphone audio is forwarded to that agent and "
+            "the agent's audio responses are played back to the user without going through "
+            "this assistant. Call this when the user says any of: 'call the service', 'call "
+            "the server', 'call the remote', 'connect to the service/remote/operator', 'dial "
+            "the service', 'hand off to the remote/operator', 'talk to the <name> agent', or "
+            "anything clearly equivalent in intent. If the user names a specific agent, pass "
+            "its name in the `agent` argument so the call routes to the right one."
         ),
         "parameters": {
             "type": "object",
@@ -44,6 +46,15 @@ START_REMOTE_AUDIO_BRIDGE_TOOL = {
                 "reason": {
                     "type": "string",
                     "description": "Short reason the user wants the bridge opened.",
+                },
+                "agent": {
+                    "type": "string",
+                    "description": (
+                        "Name (or service id) of the registered agent to connect to, as the "
+                        "user referred to it — e.g. 'weather bot'. Match it to one of the "
+                        "agents listed in the system prompt. Omit if the user did not name a "
+                        "specific agent, in which case the default configured agent is used."
+                    ),
                 },
             },
             "required": ["reason"],

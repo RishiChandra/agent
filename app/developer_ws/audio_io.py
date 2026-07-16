@@ -71,6 +71,11 @@ class AudioIO:
         self._last_chunk_recv_ms: int | None = None
         self._downlink = DownlinkOpusEncoder()
         self._uplink = UplinkOpusDecoder()
+        # Estimated wall-clock time until which the *client* is still playing
+        # bot audio. We send faster than real-time, so the server queue drains
+        # long before the user stops hearing the bot; barge-in needs the
+        # user-perceived window, not the queue state.
+        self._audible_until = 0.0
 
     def is_alive(self) -> bool:
         try:
@@ -151,6 +156,7 @@ class AudioIO:
         self._turn_active = False
         self._queue.clear()
         self._downlink.clear()
+        self._audible_until = 0.0
         self._wake.set()
         if self._task and not self._task.done():
             self._task.cancel()
@@ -162,6 +168,15 @@ class AudioIO:
 
     def is_playing(self) -> bool:
         return bool(self._queue) or (self._task is not None and not self._task.done())
+
+    def is_bot_audible(self) -> bool:
+        """True while the user is (estimated) still hearing bot audio.
+
+        Used by the endpoint's barge-in check. Combines server-side state
+        (queue/pump) with the client-side playback horizon accumulated in
+        `_emit_bundle`.
+        """
+        return self.is_playing() or time.monotonic() < self._audible_until
 
     async def _pump(self) -> None:
         emit_idx = 0
@@ -276,6 +291,11 @@ class AudioIO:
             return False
         send_ms = (loop.time() - t_send_start) * 1000
 
+        # Advance the client playback horizon: the client plays this bundle
+        # back in real time starting no earlier than now.
+        now = time.monotonic()
+        self._audible_until = max(now, self._audible_until) + bundle["bundled_ms"] / 1000.0
+
         log.debug(
             "emit#%d seq=%d t_emit=%dms chunk_seq=[%d..%d] n=%d dwell=%dms %s (~%dms) send=%.0fms q=%d",
             emit_idx + 1, payload["seq"], payload["t_emit_ms"],
@@ -290,3 +310,4 @@ class AudioIO:
         self._turn_active = False
         self._queue.clear()
         self._downlink.clear()
+        self._audible_until = 0.0

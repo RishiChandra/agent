@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Test orchestrator</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>🎙️ Agent Registry</h1>
+    <nav>
+      <a href="index.html">Register</a>
+      <a href="test.html" class="active">Test orchestrator</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="grid">
+      <!-- ===== Connection + controls ===== -->
+      <section class="card">
+        <h2>Talk to the orchestrator</h2>
+
+        <label for="wsbase">Orchestrator WebSocket base</label>
+        <input id="wsbase" value="wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net" />
+        <div class="hint">The deployed orchestrator. It connects at <code>&lt;base&gt;/ws/developer/&lt;user_id&gt;</code>.</div>
+
+        <label for="userid">User ID</label>
+        <div class="row">
+          <input id="userid" value="2ba330c0-a999-46f8-ba2c-855880bdcf5b" />
+          <button type="button" class="secondary" id="rnd" style="flex:0 0 auto">Random</button>
+        </div>
+
+        <div class="actions">
+          <button id="connect">Connect &amp; talk</button>
+          <button id="disconnect" class="secondary" disabled>Disconnect</button>
+        </div>
+
+        <div style="margin-top:16px" class="status">
+          <span id="dot" class="dot"></span><span id="statustext">Idle</span>
+        </div>
+
+        <div class="hint" id="codec-note" style="margin-top:12px"></div>
+      </section>
+
+      <!-- ===== Session log + agent reference ===== -->
+      <section class="card">
+        <h2>Session log</h2>
+        <div id="log" class="log"></div>
+
+        <h3 style="margin-top:18px">Registered agents — say “call the …”</h3>
+        <div id="agents" class="hint">Loading…</div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    // The site is deployable independently of the orchestrator, so decide
+    // where the API lives: same-origin when the orchestrator itself serves us
+    // (localhost dev or the Azure app), otherwise the deployed orchestrator.
+    // Override anywhere with ?api=http://localhost:8000
+    const ORCHESTRATOR = "https://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net";
+    const API_BASE = (() => {
+      const q = new URLSearchParams(location.search).get("api");
+      if (q) return q.replace(/\/+$/, "");
+      const h = location.hostname;
+      if (h === "localhost" || h === "127.0.0.1") return "";
+      if (ORCHESTRATOR.includes(h) && h) return "";
+      return ORCHESTRATOR;
+    })();
+
+    const UPLINK_RATE = 16000;      // server expects 16 kHz mono int16 uplink
+    const DOWNLINK_RATE = 24000;    // server sends 24 kHz Opus downlink
+    const BATCH_SAMPLES = UPLINK_RATE * 0.25; // ~250 ms per uplink message — keeps
+    // server-side silence detection timely; bigger batches add up to their whole
+    // duration to end-of-utterance latency.
+
+    let ws = null;
+    let audioCtx = null;
+    let micStream = null;
+    let micSource = null;
+    let procNode = null;
+    let zeroGain = null;
+    let decoder = null;
+    let running = false;
+
+    // Uplink accumulation (Int16 at 16 kHz).
+    let upBuf = [];
+    let upCount = 0;
+
+    // Downlink playback scheduling.
+    let playHead = 0;
+    let liveSources = [];
+    let decodeTs = 0; // microseconds, monotonically increasing per Opus frame
+
+    function log(msg, cls) {
+      const el = $("log");
+      const line = document.createElement("div");
+      if (cls) line.className = cls;
+      const t = new Date().toLocaleTimeString();
+      line.textContent = `[${t}] ${msg}`;
+      el.appendChild(line);
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function setStatus(text, cls) {
+      $("statustext").textContent = text;
+      $("dot").className = "dot" + (cls ? " " + cls : "");
+    }
+
+    // ---- base64 helpers ----
+    function b64ToBytes(b64) {
+      const bin = atob(b64);
+      const u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      return u;
+    }
+    function bytesToB64(u8) {
+      let s = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < u8.length; i += chunk) {
+        s += String.fromCharCode.apply(null, u8.subarray(i, i + chunk));
+      }
+      return btoa(s);
+    }
+
+    // Unpack [u16 BE length][opus bytes]... TLV framing (matches audio_codec.pack_opus_tlv).
+    function unpackTlv(bytes) {
+      const out = [];
+      const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let i = 0;
+      while (i + 2 <= bytes.length) {
+        const n = dv.getUint16(i, false);
+        i += 2;
+        if (i + n > bytes.length) break;
+        out.push(bytes.subarray(i, i + n));
+        i += n;
+      }
+      return out;
+    }
+
+    // ---- downlink playback ----
+    function schedulePcmFloat(f32, rate) {
+      if (!audioCtx) return;
+      const buf = audioCtx.createBuffer(1, f32.length, rate);
+      buf.copyToChannel(f32, 0);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(audioCtx.destination);
+      const now = audioCtx.currentTime;
+      if (playHead < now) playHead = now + 0.04;
+      src.start(playHead);
+      playHead += buf.duration;
+      liveSources.push(src);
+      src.onended = () => { liveSources = liveSources.filter((s) => s !== src); };
+    }
+
+    function stopPlayback() {
+      for (const s of liveSources) { try { s.stop(); } catch (_) {} }
+      liveSources = [];
+      playHead = audioCtx ? audioCtx.currentTime : 0;
+    }
+
+    function onDecodedAudio(audioData) {
+      const n = audioData.numberOfFrames;
+      const f32 = new Float32Array(n);
+      try {
+        audioData.copyTo(f32, { planeIndex: 0, format: "f32-planar" });
+        schedulePcmFloat(f32, audioData.sampleRate || DOWNLINK_RATE);
+      } catch (e) {
+        log("decode copy failed: " + e.message, "err");
+      } finally {
+        audioData.close();
+      }
+    }
+
+    function initDecoder() {
+      if (typeof AudioDecoder === "undefined") {
+        $("codec-note").innerHTML =
+          "⚠️ This browser has no WebCodecs <code>AudioDecoder</code>, so the orchestrator's " +
+          "audio replies can't be played. Mic uplink still works. Use Chrome or Edge for full audio.";
+        return null;
+      }
+      const dec = new AudioDecoder({
+        output: onDecodedAudio,
+        error: (e) => log("AudioDecoder error: " + e.message, "err"),
+      });
+      try {
+        dec.configure({ codec: "opus", sampleRate: DOWNLINK_RATE, numberOfChannels: 1 });
+      } catch (e) {
+        log("AudioDecoder configure failed: " + e.message, "err");
+        return null;
+      }
+      return dec;
+    }
+
+    function decodeOpusPacket(pkt) {
+      if (!decoder || decoder.state !== "configured") return;
+      try {
+        decoder.decode(new EncodedAudioChunk({
+          type: "key",
+          timestamp: decodeTs,
+          duration: 40000, // 40 ms frames
+          data: pkt,
+        }));
+        decodeTs += 40000;
+      } catch (e) {
+        log("opus decode failed: " + e.message, "err");
+      }
+    }
+
+    // ---- downlink message handler ----
+    function handleServerMessage(raw) {
+      let data;
+      try { data = JSON.parse(raw); } catch (_) { return; }
+
+      if (data.interrupt) { stopPlayback(); log("↩ interrupt from server", "warn"); return; }
+      if (data.error) { log("server error: " + data.error, "err"); return; }
+      if (!data.audio) {
+        if (data.turn_complete) log("· turn complete");
+        return;
+      }
+      const bytes = b64ToBytes(data.audio);
+      if (data.codec === "opus") {
+        const packets = unpackTlv(bytes);
+        for (const p of packets) decodeOpusPacket(p);
+      } else {
+        // Raw int16 PCM fallback (server without opuslib): play at downlink rate.
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const n = Math.floor(bytes.length / 2);
+        const f32 = new Float32Array(n);
+        for (let i = 0; i < n; i++) f32[i] = view.getInt16(i * 2, true) / 32768;
+        schedulePcmFloat(f32, data.sample_rate || DOWNLINK_RATE);
+      }
+    }
+
+    // ---- uplink capture ----
+    function pushUplink(f32, inRate) {
+      // Downsample float32 @ inRate -> int16 @ 16 kHz via linear interpolation.
+      const ratio = inRate / UPLINK_RATE;
+      const outLen = Math.floor(f32.length / ratio);
+      const out = new Int16Array(outLen);
+      for (let i = 0; i < outLen; i++) {
+        const src = i * ratio;
+        const i0 = Math.floor(src);
+        const i1 = Math.min(i0 + 1, f32.length - 1);
+        const frac = src - i0;
+        let s = f32[i0] * (1 - frac) + f32[i1] * frac;
+        s = Math.max(-1, Math.min(1, s));
+        out[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+      upBuf.push(out);
+      upCount += out.length;
+      if (upCount >= BATCH_SAMPLES) flushUplink();
+    }
+
+    function flushUplink() {
+      if (!upCount || !ws || ws.readyState !== WebSocket.OPEN) { upBuf = []; upCount = 0; return; }
+      const merged = new Int16Array(upCount);
+      let off = 0;
+      for (const chunk of upBuf) { merged.set(chunk, off); off += chunk.length; }
+      upBuf = []; upCount = 0;
+      const b64 = bytesToB64(new Uint8Array(merged.buffer));
+      ws.send(JSON.stringify({ audio: b64, turn_complete: false }));
+      log(`↑ sent ${(merged.length / UPLINK_RATE).toFixed(1)}s uplink`, "out");
+    }
+
+    async function connect() {
+      const base = $("wsbase").value.trim().replace(/\/+$/, "");
+      const userId = $("userid").value.trim();
+      if (!base || !userId) return;
+
+      setStatus("Requesting microphone…", "connecting");
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        setStatus("Microphone denied", "err");
+        log("getUserMedia failed: " + e.message, "err");
+        return;
+      }
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") await audioCtx.resume();
+      playHead = audioCtx.currentTime;
+      decodeTs = 0;
+      decoder = initDecoder();
+
+      micSource = audioCtx.createMediaStreamSource(micStream);
+      // ScriptProcessorNode: deprecated but universally supported and dependency-free.
+      procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      procNode.onaudioprocess = (ev) => {
+        if (!running) return;
+        pushUplink(ev.inputBuffer.getChannelData(0), audioCtx.sampleRate);
+      };
+      // Connect through a muted gain so the node runs without echoing the mic.
+      zeroGain = audioCtx.createGain();
+      zeroGain.gain.value = 0;
+      micSource.connect(procNode);
+      procNode.connect(zeroGain);
+      zeroGain.connect(audioCtx.destination);
+
+      const url = `${base}/ws/developer/${encodeURIComponent(userId)}`;
+      setStatus("Connecting…", "connecting");
+      log("connecting to " + url);
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        running = true;
+        setStatus("Connected — speak now", "on");
+        log("connected", "in");
+        $("connect").disabled = true;
+        $("disconnect").disabled = false;
+      };
+      ws.onmessage = (ev) => handleServerMessage(ev.data);
+      ws.onerror = () => { log("websocket error", "err"); };
+      ws.onclose = (ev) => {
+        log(`closed (code ${ev.code}${ev.reason ? ", " + ev.reason : ""})`, "warn");
+        teardown();
+      };
+    }
+
+    function teardown() {
+      running = false;
+      try { flushUplink(); } catch (_) {}
+      if (procNode) { try { procNode.disconnect(); } catch (_) {} procNode.onaudioprocess = null; procNode = null; }
+      if (zeroGain) { try { zeroGain.disconnect(); } catch (_) {} zeroGain = null; }
+      if (micSource) { try { micSource.disconnect(); } catch (_) {} micSource = null; }
+      if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+      stopPlayback();
+      if (decoder && decoder.state !== "closed") { try { decoder.close(); } catch (_) {} }
+      decoder = null;
+      if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
+      if (ws && ws.readyState === WebSocket.OPEN) { try { ws.close(); } catch (_) {} }
+      ws = null;
+      setStatus("Idle");
+      $("connect").disabled = false;
+      $("disconnect").disabled = true;
+    }
+
+    $("connect").addEventListener("click", connect);
+    $("disconnect").addEventListener("click", teardown);
+    $("rnd").addEventListener("click", () => {
+      $("userid").value = (crypto.randomUUID && crypto.randomUUID()) ||
+        "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+        });
+    });
+
+    // Load registered agents as a reference for what to say.
+    (async () => {
+      try {
+        const res = await fetch(API_BASE + "/api/agents?active_only=true");
+        const { agents } = await res.json();
+        if (!agents.length) { $("agents").textContent = "No agents registered yet."; return; }
+        $("agents").innerHTML = agents.map((a) =>
+          `• <b>${a.name.replace(/[<>&]/g, "")}</b>${a.description ? " — " + a.description.replace(/[<>&]/g, "") : ""}`
+        ).join("<br>");
+      } catch (_) {
+        $("agents").textContent = "Could not load agents (open this page from the deployed site).";
+      }
+    })();
+
+    if (typeof AudioDecoder === "undefined") initDecoder(); // surface the codec note up front
+  </script>
+</body>
+</html>

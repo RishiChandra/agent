@@ -147,6 +147,7 @@ MSYS_NO_PATHCONV=1 az webapp config appsettings set \
         GOOGLE_API_KEY="${GOOGLE_API_KEY}" \
         AZURE_SERVICEBUS_CONNECTION_STRING="${AZURE_SERVICEBUS_CONNECTION_STRING}" \
         VOSK_MODEL_PATH="${REMOTE_VOSK_PATH}" \
+        DEVELOPER_WS_END_SILENCE_SEC="1.0" \
         PIPER_MODEL_PATH="${REMOTE_PIPER_MODEL_PATH}" \
         ApplicationInsightsAgent_EXTENSION_VERSION="disabled" \
         XDT_MicrosoftApplicationInsights_Mode="disabled" \
@@ -175,6 +176,7 @@ def walk_into(zf, root):
 # once via Kudu's /api/zip/data/), so they are *not* shipped in every deploy.
 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
     walk_into(zf, "app")
+    walk_into(zf, "agent_directory")  # registration website (served at /)
     zf.write("requirements.txt")
 PYEOF
 

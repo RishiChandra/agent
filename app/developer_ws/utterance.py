@@ -44,11 +44,46 @@ class UtteranceBuffer:
         self._arm_id = 0
         self._timer: asyncio.Task | None = None
         self._end_silence_s = float(os.environ.get("DEVELOPER_WS_END_SILENCE_SEC", "2.0"))
+        # Clients batch uplink audio; if the configured silence window is
+        # shorter than the batch cadence, the timer fires between batches and
+        # chops every utterance into per-batch fragments. Track the observed
+        # inter-arm gap (EMA) and never sleep less than ~1.3x that cadence.
+        self._last_arm_t: float | None = None
+        self._gap_ema_s = 0.0
+        self._max_adaptive_s = float(os.environ.get("DEVELOPER_WS_MAX_SILENCE_SEC", "3.0"))
         self._vad_rms = float(os.environ.get("DEVELOPER_WS_VAD_RMS", "20"))
+        # Barge-in: interrupting the bot needs a deliberately higher bar than
+        # the normal VAD gate — loud speech (well above residual speaker echo)
+        # sustained across consecutive batches — so playback bleed doesn't
+        # self-interrupt the bot.
+        self._barge_rms = float(os.environ.get("DEVELOPER_WS_BARGE_RMS", "500"))
+        self._barge_batches = int(os.environ.get("DEVELOPER_WS_BARGE_BATCHES", "2"))
+        self._barge_streak = 0
 
     def has_speech(self, pcm: bytes) -> bool:
         """True if the batch's RMS clears the VAD threshold (skip silent batches)."""
         return rms_int16_le(pcm) >= self._vad_rms
+
+    def barge_in_hit(self, pcm: bytes) -> bool:
+        """Track consecutive loud batches while the bot is speaking.
+
+        Called by `_handle_audio` in endpoint.py for each uplink batch that
+        arrives while `audio.is_bot_audible()`. Returns True (and resets) once
+        `_barge_batches` consecutive batches clear the barge-in RMS threshold —
+        the caller then interrupts the bot mid-speech.
+        """
+        if rms_int16_le(pcm) >= self._barge_rms:
+            self._barge_streak += 1
+        else:
+            self._barge_streak = 0
+        if self._barge_streak >= self._barge_batches:
+            self._barge_streak = 0
+            return True
+        return False
+
+    def reset_barge_in(self) -> None:
+        """Clear the barge-in streak (bot stopped talking, or bridge active)."""
+        self._barge_streak = 0
 
     async def cancel_timer(self) -> None:
         t = self._timer
@@ -72,11 +107,25 @@ class UtteranceBuffer:
         await self.cancel_timer()
         self._arm_id += 1
         my_id = self._arm_id
-        log.info("timer ARMED id=%d sleep=%.2fs", my_id, self._end_silence_s)
+
+        # Update the inter-batch cadence estimate (gaps >5s are pauses between
+        # utterances, not batch cadence — ignore them).
+        now = asyncio.get_running_loop().time()
+        if self._last_arm_t is not None:
+            gap = now - self._last_arm_t
+            if 0.0 < gap <= 5.0:
+                self._gap_ema_s = gap if not self._gap_ema_s else (0.7 * self._gap_ema_s + 0.3 * gap)
+        self._last_arm_t = now
+
+        sleep_s = max(
+            self._end_silence_s,
+            min(1.3 * self._gap_ema_s, self._max_adaptive_s),
+        )
+        log.info("timer ARMED id=%d sleep=%.2fs (gap_ema=%.2fs)", my_id, sleep_s, self._gap_ema_s)
 
         async def _watch() -> None:
             try:
-                await asyncio.sleep(self._end_silence_s)
+                await asyncio.sleep(sleep_s)
             except asyncio.CancelledError:
                 log.info("timer CANCELLED id=%d", my_id)
                 return
