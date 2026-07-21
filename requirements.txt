@@ -25,7 +25,11 @@ piper-tts
 # Pipecat — frame-based voice pipeline (STT → LLM → TTS orchestration).
 # Pinning the minor version; bumps can change frame names (e.g. 1.2 renamed
 # StartInterruptionFrame → InterruptionFrame).
-pipecat-ai>=1.2,<1.3
+# [silero] declares the Silero VAD endpointing dependency (developer_ws/vad.py).
+# In 1.2.x the extra is a no-op — onnxruntime is a base dep and the
+# silero_vad.onnx model ships inside the wheel — but keep it in case a future
+# version gates onnxruntime behind the extra again.
+pipecat-ai[silero]>=1.2,<1.3
 
 # Azure (device SDK has wheels; service SDK optional, see below)
 azure-servicebus

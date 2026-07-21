@@ -49,7 +49,8 @@ Two flow modes coexist:
 
 - **Local mode** — incoming audio enters the Pipecat pipeline. The STT processor
   accumulates audio between `UserStartedSpeakingFrame` and `UserStoppedSpeakingFrame`
-  signals (the latter fired by `endpoint.py` when the silence timer expires or
+  signals (the latter fired by `endpoint.py` when Silero VAD confirms end of
+  speech (`vad.py`, primary), the fallback silence timer expires, or
   `turn_complete:true` arrives), runs Vosk, emits a `TranscriptionFrame`, and the
   rest of the pipeline runs LLM → TTS → downlink.
 - **Bridge mode** — `BridgeGateProcessor` swallows uplink audio while
@@ -93,11 +94,20 @@ Two flow modes coexist:
   directly). Holds the per-session `LLMContext`, dispatches function calls to
   registered handlers, and exposes `on_message_added` so the scratchpad can
   mirror conversation history without being authoritative.
+- [`vad.py`](vad.py) — Silero VAD endpointing, the *primary* end-of-turn signal.
+  Wraps pipecat's `SileroVADAnalyzer` (ONNX model bundled with pipecat-ai);
+  `endpoint.py` feeds it every non-bridge batch and closes the turn on the
+  STOPPED transition — `DEVELOPER_WS_SILERO_STOP_SECS` (default 0.8 s) of
+  confirmed non-speech instead of the 2 s RMS silence window. Tunables:
+  `DEVELOPER_WS_SILERO_{CONFIDENCE,START_SECS,STOP_SECS,MIN_VOLUME}`; disable
+  with `DEVELOPER_WS_USE_SILERO_VAD=0` (or when onnxruntime is missing, it
+  degrades to timer-only automatically).
 - [`utterance.py`](utterance.py) — end-of-utterance silence-timer state machine
   (`DEVELOPER_WS_END_SILENCE_SEC`). Re-arms on every batch that clears the VAD
   threshold (`DEVELOPER_WS_VAD_RMS`). When the gap expires, fires
   `pipeline.signal_user_stopped`. Audio accumulation lives in the STT processor
-  now; this file is just the timer.
+  now; this file is just the timer — kept as the fallback endpointing path
+  behind `vad.py` (fires if the VAD never confirms speech in an utterance).
 - [`stt.py`](stt.py) — Vosk STT helper, preloaded during app startup. Called from
   `VoskUtteranceSTTProcessor`.
 - [`tts.py`](tts.py) — Piper TTS helper, preloaded during app startup. Called from
@@ -229,7 +239,8 @@ Echo-server-only knobs:
   `SpeechPipeline._register_tools` (pipeline.py).
 - **A new control message between client and main** → add a clause in
   `endpoint._receive_loop`.
-- **A change to how utterances are segmented** → [utterance.py](utterance.py)
+- **A change to how utterances are segmented** → [vad.py](vad.py) (Silero
+  endpointing) and [utterance.py](utterance.py) (fallback silence timer)
   (`has_speech`, `arm_timer`, threshold env vars) and/or the
   start/stop-speaking signal-points in `endpoint._handle_audio`.
 - **A new pipeline stage (e.g. translation between STT and LLM)** → add a
