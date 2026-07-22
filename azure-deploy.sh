@@ -148,6 +148,7 @@ MSYS_NO_PATHCONV=1 az webapp config appsettings set \
         AZURE_SERVICEBUS_CONNECTION_STRING="${AZURE_SERVICEBUS_CONNECTION_STRING}" \
         VOSK_MODEL_PATH="${REMOTE_VOSK_PATH}" \
         DEVELOPER_WS_END_SILENCE_SEC="1.0" \
+        DEVELOPER_WS_SILERO_STOP_SECS="0.8" \
         PIPER_MODEL_PATH="${REMOTE_PIPER_MODEL_PATH}" \
         ApplicationInsightsAgent_EXTENSION_VERSION="disabled" \
         XDT_MicrosoftApplicationInsights_Mode="disabled" \
