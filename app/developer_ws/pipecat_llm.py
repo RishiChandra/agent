@@ -52,6 +52,17 @@ from pipecat.services.settings import LLMSettings
 
 log = logging.getLogger("developer_ws")
 
+# Prefix added to the first user turn transcribed after the user interrupted
+# the assistant (barge-in or an explicit interrupt frame). Referenced verbatim
+# in _DEFAULT_SYSTEM below and in the end_conversation tool description in
+# tools.py — keep all three in sync.
+INTERRUPTION_TAG = "[interrupted assistant mid-reply]"
+
+# An interruption tag is only meaningful for speech that immediately follows
+# the interrupt. If the user barges in but says nothing transcribable, don't
+# let the stale flag mislabel an utterance minutes later.
+_INTERRUPTION_TAG_TTL_S = 15.0
+
 _DEFAULT_SYSTEM = (
     "You are a helpful assistant. The user's message below was transcribed from their speech. "
     "Reply briefly and clearly, as if you are speaking aloud to them. "
@@ -69,6 +80,15 @@ _DEFAULT_SYSTEM = (
     "they're already connected. If the most recent is the disconnect (or neither has been "
     "said), the bridge is currently CLOSED. "
     "Otherwise reply with plain text."
+    "\n\n"
+    "Turn-taking — interrupted speech: a user message beginning with "
+    "'[interrupted assistant mid-reply]' means the user cut you off while you were "
+    "speaking. In that context, phrases like 'stop', 'okay', 'alright', or 'that's "
+    "enough' almost always mean they want you to STOP TALKING, not end the session: "
+    "reply with a very brief acknowledgment (e.g. 'Okay.') or nothing at all, stay "
+    "available, and do NOT call end_conversation unless the message also contains a "
+    "clear farewell (e.g. 'goodbye', 'end the call'). If the interrupted message is a "
+    "new question or instruction, just answer it directly."
 )
 
 
@@ -119,6 +139,9 @@ class CustomGeminiLLMService(LLMService):
         # message. `_messages_to_contents` in gemini_client.py pulls system role
         # out and feeds it as system_instruction, so this round-trips cleanly.
         self._context = LLMContext(messages=[{"role": "system", "content": self._system}])
+        # Set by mark_user_interruption(); consumed (and cleared) by the next
+        # TranscriptionFrame so that utterance carries INTERRUPTION_TAG.
+        self._interrupted_at: Optional[float] = None
 
     # Exposed so other code (scratchpad dump, ping handler) can read history.
     @property
@@ -154,6 +177,26 @@ class CustomGeminiLLMService(LLMService):
         """
         self._add_message("assistant", text)
 
+    def mark_user_interruption(self) -> None:
+        """Record that the user just interrupted the assistant.
+
+        Called by `SpeechPipeline.interrupt()` (barge-in and explicit interrupt
+        frames). The next transcription within `_INTERRUPTION_TAG_TTL_S` is
+        prefixed with `INTERRUPTION_TAG` so the model can tell "stop talking"
+        apart from "end the session" (see the turn-taking rules in
+        `_DEFAULT_SYSTEM` and the end_conversation tool description).
+        """
+        self._interrupted_at = time.monotonic()
+
+    def _maybe_tag_interruption(self, text: str) -> str:
+        """Prefix `text` with INTERRUPTION_TAG if an interrupt was just recorded."""
+        interrupted_at, self._interrupted_at = self._interrupted_at, None
+        if interrupted_at is None:
+            return text
+        if (time.monotonic() - interrupted_at) > _INTERRUPTION_TAG_TTL_S:
+            return text
+        return f"{INTERRUPTION_TAG} {text}"
+
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
@@ -161,7 +204,7 @@ class CustomGeminiLLMService(LLMService):
             text = (frame.text or "").strip()
             if not text:
                 return
-            self._add_message("user", text)
+            self._add_message("user", self._maybe_tag_interruption(text))
             await self._call_gemini()
             return
 

@@ -272,10 +272,13 @@ class SpeechPipeline:
         await self._task.queue_frame(UserStoppedSpeakingFrame())
 
     async def interrupt(self) -> None:
-        """User said stop / sent `{interrupt:true}`. Tear down bridge, clear playback."""
+        """User said stop / sent `{interrupt:true}` / barged in. Tear down bridge, clear playback."""
         if self._bridge.active:
             await self._bridge.close()
         self._speaking = False
+        # Tag the next transcription as post-interruption so the LLM can tell
+        # "stop talking" apart from "end the session" (see pipecat_llm.py).
+        self._llm.mark_user_interruption()
         await self._task.queue_frame(InterruptionFrame())
 
     async def inject_assistant_text(self, text: str) -> bool:
