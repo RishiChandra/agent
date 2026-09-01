@@ -84,3 +84,9 @@ vertex_ai_service_account.json
 deploy-*.zip
 data-bundle.zip
 creds.tmp.json
+
+# Oracle VM deploy: secrets + files generated on the VM
+deploy/.env
+deploy/mosquitto/certs/
+deploy/mosquitto/passwd
+deploy/mosquitto/acl

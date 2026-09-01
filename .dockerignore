@@ -1,61 +1,41 @@
-# Git
+# Only app/, listener/, agent_directory/, deploy/sql/ and requirements.txt go into the image.
 .git
 .gitignore
+.gitattributes
+.claude
+.vscode
+.idea
 
-# Python
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-env
-pip-log.txt
-pip-delete-this-directory.txt
-.tox
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-.git
-.mypy_cache
-.pytest_cache
-.hypothesis
+# Secrets / deploy-time artifacts (mounted at runtime, never baked in);
+# deploy/sql is the one exception (schema the worker applies at startup).
+.env
+deploy
+!deploy/sql
+data
+vosk-model-*
+piper_voices
 
-# Virtual environments
-venv/
-ENV/
-env/
-.venv/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Azure deployment files
-.deployment
-.startup
-app.zip
+# Not part of the backend
+mobile_app
+test
+scripts
+python_test
+*.md
 *.zip
+*.sh
+azure-deploy.sh
+test-docker.sh
+pyrightconfig.json
 
-# Testing
-test_ws.py
-testing/
-
-# Documentation
-readme.md
-README.md
+# Python / OS noise (patterns are anchored to the context root, hence **/)
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+.coverage
+htmlcov
+venv
+.venv
+env
+.DS_Store
+*.log

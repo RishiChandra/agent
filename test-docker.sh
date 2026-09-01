@@ -14,7 +14,11 @@ fi
 
 echo "✅ Docker is running"
 
-export GOOGLE_API_KEY="AIzaSyDaKhKOiWqi_MFaNObcXswkjS_kiWdauVA"
+# Never hardcode the key here: take it from the shell, else from deploy/.env.
+if [ -z "${GOOGLE_API_KEY:-}" ] && [ -f deploy/.env ]; then
+    GOOGLE_API_KEY="$(grep -E '^GOOGLE_API_KEY=' deploy/.env | tail -n1 | cut -d= -f2-)"
+fi
+export GOOGLE_API_KEY="${GOOGLE_API_KEY:?set GOOGLE_API_KEY in your shell or in deploy/.env}"
 
 # Build the Docker image
 echo "🐳 Building Docker image..."
@@ -58,6 +62,4 @@ docker stop websocket-test
 docker rm websocket-test
 
 echo "🎉 Docker test completed successfully!"
-echo "💡 You can now deploy to Azure using:"
-echo "   ./azure-deploy.sh (full deployment)"
-echo "   ./azure-deploy-simple.sh (simple deployment)"
+echo "💡 You can now deploy to the Oracle VM with deploy/deploy.sh (see deploy/README.md)"

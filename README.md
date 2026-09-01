@@ -81,7 +81,15 @@ Default brings up main, the mic client, and the echo relay (each in its own cons
 To run manually instead: ```python app/main.py```, then ```python test/app/developer/test_developer_ws.py```, then (from `app/`) ```python developer_ws/testing/echo_server.py``` (append ```--ping <user_id>``` for the auto-call variant).
 See ```app/developer_ws/DESIGN.md``` and ```BRIDGE_PROTOCOL.md``` for architecture and wire protocol.
 
-## Deploy to Azure App Service
+## Deploy (Oracle Cloud VM)
+
+The backend runs on one Oracle Cloud VM under docker compose; ```deploy/deploy.sh```
+does the whole deploy. See [```deploy/README.md```](deploy/README.md).
+
+## Legacy: Deploy to Azure App Service (decommissioned)
+
+Kept for reference only — ```azure-deploy.sh``` and ```startup.sh``` target the old
+App Service and are no longer used.
 
 Zip deploy, no Docker. Done by ```azure-deploy.sh```. Target: ```ai-pin``` resource group, ```websocket-ai-pin``` Linux App Service (Python 3.12, B1).
 
@@ -188,7 +196,12 @@ We host a postgres sql server in our Azure resource group.
 Use pgAdmin4 (or other sql client of choice) to connect to the db.
 Credentials can be found in internal docs (ask Rishi) or in the env vars of the web app / app service.
 
-## Listener Function app
+## Legacy: Listener Function app (replaced by ```listener/worker.py```)
+
+The Azure Function + Service Bus queue are replaced by the ```worker``` compose
+service (```listener/worker.py```, polling the Postgres ```jobs``` table) and
+Mosquitto — see ```deploy/README.md```. The notes below describe the old setup.
+
 Deploy with ```func azure functionapp publish listener --python``` in listener dir
 
 View Listener Logs Here:

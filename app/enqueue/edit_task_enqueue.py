@@ -1,12 +1,12 @@
 """
 Edit-task enqueue operations module.
-Cancels the existing scheduled message (by sequence_id from the task table) and
-re-enqueues a new message with updated time / info / payload using the same format as task_enqueue.
+Cancels the existing pending job (by enqueue_sequence_id = jobs.id from the task table)
+and inserts a new one with updated time / info / payload using the same format as task_enqueue.
 """
 from typing import Optional, Dict, Any
 
 from database import execute_query, execute_update
-from enqueue.task_enqueue import get_service_bus_client, enqueue_task
+from enqueue.task_enqueue import cancel_job, enqueue_task
 
 
 def reenqueue_task_after_edit(
@@ -17,8 +17,8 @@ def reenqueue_task_after_edit(
     queue_name: str = "q1",
 ) -> Dict[str, Any]:
     """
-    Look up the task's enqueue_sequence_id in the SQL table, cancel that scheduled
-    message in Service Bus, then enqueue a new message with the updated time/info/payload.
+    Look up the task's enqueue_sequence_id in the SQL table, cancel that pending
+    job, then enqueue a new job with the updated time/info/payload.
 
     Uses the same message format as task_enqueue (prepare_message_contents, enqueue_task).
 
@@ -27,13 +27,13 @@ def reenqueue_task_after_edit(
         user_id: The user ID (must match task row)
         task_info: Updated task information dict (e.g. {"info": "description"})
         time_to_execute: Updated ISO 8601 datetime string for scheduled delivery
-        queue_name: Service Bus queue name (default: "q1")
+        queue_name: Unused; kept so existing call sites keep working
 
     Returns:
         Enqueue result dict from enqueue_task (success, task_id, scheduled_time, sequence_id, ...)
 
     Raises:
-        ValueError: If task not found or Service Bus not configured
+        ValueError: If task not found
     """
     # Load current enqueue_sequence_id from tasks table
     query = """
@@ -47,14 +47,14 @@ def reenqueue_task_after_edit(
 
     enqueue_sequence_id = rows[0].get("enqueue_sequence_id") if rows else None
 
-    # Cancel existing scheduled message if we have a sequence number
+    # Cancel the existing pending job if we have its id
     if enqueue_sequence_id is not None:
-        with get_service_bus_client() as client:
-            with client.get_queue_sender(queue_name) as sender:
-                sender.cancel_scheduled_messages(enqueue_sequence_id)
-                print(f"✅ Cancelled scheduled message for task {task_id} (sequence_id={enqueue_sequence_id})")
+        if cancel_job(enqueue_sequence_id):
+            print(f"✅ Cancelled pending job for task {task_id} (job_id={enqueue_sequence_id})")
+        else:
+            print(f"Job {enqueue_sequence_id} for task {task_id} already delivered or missing; nothing to cancel")
 
-    # Enqueue new message with updated payload (same format as task_enqueue)
+    # Enqueue new job with updated payload (same format as task_enqueue)
     result = enqueue_task(
         task_id=task_id,
         user_id=user_id,
@@ -63,7 +63,7 @@ def reenqueue_task_after_edit(
         queue_name=queue_name,
     )
 
-    # Persist new sequence_id to task row when present (scheduled messages only)
+    # Persist new job id to task row
     if result.get("sequence_id") is not None:
         try:
             execute_update(
@@ -82,11 +82,11 @@ def cancel_scheduled_task_for_task_id(
     queue_name: str = "q1",
 ) -> bool:
     """
-    Look up the task's enqueue_sequence_id and cancel that scheduled message in Service Bus.
+    Look up the task's enqueue_sequence_id and cancel that pending job.
     Also sets enqueue_sequence_id to NULL in the task row. Use when e.g. task is marked completed.
 
     Returns:
-        True if a message was cancelled (or no sequence_id was stored), False if task not found.
+        True if a job was cancelled (or no sequence_id was stored), False if task not found.
     """
     query = """
         SELECT enqueue_sequence_id
@@ -101,10 +101,10 @@ def cancel_scheduled_task_for_task_id(
     if enqueue_sequence_id is None:
         return True  # Nothing to cancel
 
-    with get_service_bus_client() as client:
-        with client.get_queue_sender(queue_name) as sender:
-            sender.cancel_scheduled_messages(enqueue_sequence_id)
-            print(f"✅ Cancelled scheduled message for task {task_id} (sequence_id={enqueue_sequence_id})")
+    if cancel_job(enqueue_sequence_id):
+        print(f"✅ Cancelled pending job for task {task_id} (job_id={enqueue_sequence_id})")
+    else:
+        print(f"Job {enqueue_sequence_id} for task {task_id} already delivered or missing; nothing to cancel")
 
     execute_update(
         "UPDATE tasks SET enqueue_sequence_id = NULL WHERE task_id = %s",
@@ -122,7 +122,7 @@ def cancel_scheduled_task_for_task_id_safe(
     try:
         return cancel_scheduled_task_for_task_id(task_id, user_id, queue_name)
     except Exception as e:
-        print(f"Warning: Failed to cancel scheduled message for task {task_id}: {e}")
+        print(f"Warning: Failed to cancel pending job for task {task_id}: {e}")
         return False
 
 

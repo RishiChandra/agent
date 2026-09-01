@@ -1,0 +1,24 @@
+# Edge: TLS termination + reverse proxy to the FastAPI app.
+#
+# Host names come from deploy/.env via docker-compose.yml (SITE_HOST_V4 /
+# SITE_HOST_V6). Caddy obtains and renews a Let's Encrypt certificate for each
+# host automatically (HTTP-01 on :80, TLS-ALPN on :443) and redirects plain
+# HTTP to HTTPS. WebSocket upgrades (/ws/... and /ws/developer/...) pass
+# through reverse_proxy unchanged.
+#
+# Certificates are stored under /data/caddy/certificates/<issuer>/<host>/ in
+# the caddy_data volume; deploy/mosquitto/certsync.sh copies the MQTT_TLS_HOST
+# one out for mosquitto.
+
+# HTTP/3 off: the ESP32 does not use it and only TCP 443 is reachable (host
+# firewall + OCI security list), so advertising h3 would just make browsers
+# probe QUIC and fall back. docker-compose.yml publishes no 443/udp either.
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$SITE_HOST_V4}, {$SITE_HOST_V6} {
+	reverse_proxy app:8000
+}

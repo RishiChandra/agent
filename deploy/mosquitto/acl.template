@@ -1,0 +1,16 @@
+# Mosquitto ACL — TEMPLATE.
+#
+# deploy/deploy.sh substitutes the @TOKENS@ from deploy/.env and writes the
+# result to deploy/mosquitto/acl (gitignored) on the VM before mosquitto
+# (re)starts; mosquitto reads that as /mosquitto/config/acl.
+# Do not put real usernames here — change deploy/.env instead.
+
+# Backend / worker: everything (publishes retained commands, reads device status).
+user @MQTT_USERNAME@
+topic readwrite #
+topic read $SYS/#
+
+# Device: only its own subtree, i.e. @MQTT_COMMAND_TOPIC_PREFIX@/@DEVICE_ID@/cmd
+# (subscribe) and anything it publishes under @MQTT_COMMAND_TOPIC_PREFIX@/@DEVICE_ID@/.
+user @MQTT_DEVICE_USERNAME@
+topic readwrite @MQTT_COMMAND_TOPIC_PREFIX@/@DEVICE_ID@/#

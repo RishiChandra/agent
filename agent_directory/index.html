@@ -81,16 +81,15 @@
     const countEl = $("count");
 
     // The site is deployable independently of the orchestrator, so decide
-    // where the API lives: same-origin when the orchestrator itself serves us
-    // (localhost dev or the Azure app), otherwise the deployed orchestrator.
+    // where the API lives: same-origin whenever this page is served over
+    // http(s) (the orchestrator serves this directory at "/"), otherwise —
+    // file:// or static hosting — the deployed orchestrator.
     // Override anywhere with ?api=http://localhost:8000
-    const ORCHESTRATOR = "https://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net";
+    const ORCHESTRATOR = "https://146-235-229-232.sslip.io";
     const API_BASE = (() => {
       const q = new URLSearchParams(location.search).get("api");
       if (q) return q.replace(/\/+$/, "");
-      const h = location.hostname;
-      if (h === "localhost" || h === "127.0.0.1") return "";
-      if (ORCHESTRATOR.includes(h) && h) return "";
+      if (location.protocol === "http:" || location.protocol === "https:") return "";
       return ORCHESTRATOR;
     })();
 

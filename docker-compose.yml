@@ -1,19 +1,110 @@
-version: '3.8'
+# AI Pin backend — everything on one Oracle Cloud VM.
+#
+# Secrets and host names live in deploy/.env (gitignored). That file is used
+# both for ${...} interpolation here and as env_file for the containers, so
+# always run compose as:
+#
+#     docker compose --env-file deploy/.env <command>
+#
+# deploy/deploy.sh does this for you.
+
+name: aipin
 
 services:
-  websocket-app:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - PORT=8000
-    volumes:
-      - ./app:/app/app
+  # Edge: :80/:443, automatic Let's Encrypt for both sslip.io hosts, reverse
+  # proxy to the app (WebSocket upgrade passes through by default).
+  caddy:
+    image: caddy:2
+    container_name: aipin-caddy
     restart: unless-stopped
+    # No 443/udp: HTTP/3 is switched off in the Caddyfile (only TCP is opened
+    # in the host firewall and the OCI security list).
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_HOST_V4: ${SITE_HOST_V4:-146-235-229-232.sslip.io}
+      SITE_HOST_V6: ${SITE_HOST_V6:-2603-c024-c020-3700-0-537e-9221-8587.sslip.io}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # ACME account + certificates. deploy/mosquitto/certsync.sh reads the
+      # certs out of this volume (via `docker exec`) for the MQTT listener.
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # FastAPI + WebSocket server (uvicorn on :8000, only reachable via caddy).
+  app:
+    build: .
+    image: aipin-agent:latest
+    container_name: aipin-app
+    restart: unless-stopped
+    env_file: deploy/.env
+    environment:
+      PORT: "8000"
+    volumes:
+      # Vosk model + Piper voice (deploy/download_models.sh fills ./data).
+      - ./data:/data:ro
+      # Registration website served at "/"; bind-mounted so edits need no rebuild.
+      - ./agent_directory:/app/agent_directory:ro
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Listener worker: replaces the Azure Function + Service Bus; talks to
+  # postgres and publishes device commands to mosquitto.
+  worker:
+    build: .
+    image: aipin-agent:latest
+    container_name: aipin-worker
+    restart: unless-stopped
+    working_dir: /app
+    command: ["python", "listener/worker.py"]
+    # The image's HEALTHCHECK probes the app's /healthz; the worker runs no
+    # HTTP server, so it would be reported unhealthy forever.
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/healthz')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      disable: true
+    env_file: deploy/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+
+  postgres:
+    image: postgres:16
+    container_name: aipin-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in deploy/.env}
+      POSTGRES_USER: ${DB_USER:?set DB_USER in deploy/.env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in deploy/.env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # MQTT broker for device commands. Only the TLS listener (8883) is
+  # published; the plaintext listener in mosquitto.conf stays on the compose
+  # network. Config dir is mounted whole so passwd/acl/certs generated on the
+  # VM (deploy.sh, certsync.sh) are visible without recreating the container.
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: aipin-mosquitto
+    restart: unless-stopped
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./deploy/mosquitto:/mosquitto/config:ro
+      - mosquitto_data:/mosquitto/data
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:
+  mosquitto_data:
