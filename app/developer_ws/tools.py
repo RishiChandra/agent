@@ -72,9 +72,14 @@ END_CONVERSATION_TOOL = {
             "'thanks, that's all', 'thanks, that's enough', 'I'm done', 'see you later', "
             "'no, I'm good', 'we're done here', or anything clearly equivalent in intent. "
             "Use judgment: do NOT call this if the user is asking a follow-up question, "
-            "thanking you mid-conversation, or still actively engaged. Only call it when "
-            "the user is genuinely wrapping up. After this is called the assistant speaks "
-            "a brief goodbye and the WebSocket closes."
+            "thanking you mid-conversation, or still actively engaged. "
+            "EXCEPTION — interrupted speech: if the user's message begins with "
+            "'[interrupted assistant mid-reply]', they cut the assistant off while it was "
+            "talking, and phrases like 'stop', 'okay', 'that's enough' mean STOP TALKING, "
+            "not end the session — do NOT call this tool then, unless the message also "
+            "contains a clear farewell such as 'goodbye' or 'end the call'. "
+            "Only call it when the user is genuinely wrapping up. After this is called "
+            "the assistant speaks a brief goodbye and the WebSocket closes."
         ),
         "parameters": {
             "type": "object",

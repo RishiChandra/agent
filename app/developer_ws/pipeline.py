@@ -23,18 +23,23 @@ What changed:
 
 from __future__ import annotations
 
+import array
 import asyncio
 import logging
+import math
 import os
+import sys
 import urllib.parse
 from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     EndFrame,
     FunctionCallResultProperties,
     InputAudioRawFrame,
     InterruptionFrame,
+    TTSAudioRawFrame,
     TTSSpeakFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -146,6 +151,53 @@ _SERVICE_PING_ANNOUNCE = "Your service wants to speak with you. Connecting you n
 _END_CONVERSATION_ACK = "Goodbye! Take care."
 
 
+def _build_ding_pcm(sample_rate: int = DOWNLINK_SAMPLE_RATE) -> bytes:
+    """A short two-tone ascending chime (int16 mono @ DOWNLINK_SAMPLE_RATE).
+
+    Played the instant a remote-bridge connect begins so the handoff to the
+    remote agent is unmistakable. Tone durations are exact multiples of 20 ms
+    so the Opus downlink encoder is left with no residual sub-frame.
+    """
+    tones = ((784.0, 0.12), (1047.0, 0.14))  # G5 -> C6, a rising "connecting" cue
+    amp = 0.28 * 32767
+    fade = max(1, int(0.006 * sample_rate))  # 6 ms in/out fade to avoid clicks
+    samples = array.array("h")
+    for freq, dur in tones:
+        n = int(dur * sample_rate)
+        for i in range(n):
+            gain = 1.0
+            if i < fade:
+                gain = i / fade
+            elif i > n - fade:
+                gain = max(0.0, (n - i) / fade)
+            samples.append(
+                int(amp * gain * math.sin(2.0 * math.pi * freq * i / sample_rate))
+            )
+    if sys.byteorder == "big":  # downlink PCM is int16 little-endian
+        samples.byteswap()
+    return samples.tobytes()
+
+
+# Precomputed once at import; reused for every ding.
+_DING_PCM = _build_ding_pcm()
+
+
+def _ding_frames() -> list:
+    """Frames that play the connect chime through the normal downlink path.
+
+    A ``TTSAudioRawFrame`` carries the PCM to ``AudioIOSinkProcessor`` (which
+    calls ``add_playback_pcm``); the trailing ``BotStoppedSpeakingFrame`` makes
+    the sink ``mark_turn_complete`` so the turn state resets cleanly instead of
+    leaving the pump armed. Pushed *after* an ack's ``TTSSpeakFrame`` at the same
+    injection point, the FIFO Piper processor guarantees the ding lands right
+    after the ack's audio — i.e. speech first, then ding.
+    """
+    return [
+        TTSAudioRawFrame(audio=_DING_PCM, sample_rate=DOWNLINK_SAMPLE_RATE, num_channels=1),
+        BotStoppedSpeakingFrame(),
+    ]
+
+
 def _fail_message(result: BridgeStartResult) -> str:
     if result.outcome == OUTCOME_NO_PICKUP:
         return _BRIDGE_FAIL_NO_PICKUP
@@ -239,6 +291,20 @@ class SpeechPipeline:
             return
         self._runner_task = asyncio.create_task(self._runner.run(self._task))
 
+    async def play_connect_ding(self) -> None:
+        """Play the chime once, signalling the orchestrator session is live.
+
+        Called by the endpoint right after the session is wired up so the user
+        hears an audible "you're connected" cue the moment the WebSocket opens.
+        """
+        if not self._alive():
+            return
+        try:
+            for _f in _ding_frames():
+                await self._task.queue_frame(_f)
+        except Exception:
+            log.exception("user_id=%s connect ding failed", self._user_id)
+
     async def feed_audio(self, pcm: bytes) -> None:
         """Push one audio batch into the pipeline.
 
@@ -272,10 +338,13 @@ class SpeechPipeline:
         await self._task.queue_frame(UserStoppedSpeakingFrame())
 
     async def interrupt(self) -> None:
-        """User said stop / sent `{interrupt:true}`. Tear down bridge, clear playback."""
+        """User said stop / sent `{interrupt:true}` / barged in. Tear down bridge, clear playback."""
         if self._bridge.active:
             await self._bridge.close()
         self._speaking = False
+        # Tag the next transcription as post-interruption so the LLM can tell
+        # "stop talking" apart from "end the session" (see pipecat_llm.py).
+        self._llm.mark_user_interruption()
         await self._task.queue_frame(InterruptionFrame())
 
     async def inject_assistant_text(self, text: str) -> bool:
@@ -446,9 +515,15 @@ class SpeechPipeline:
              not generate a follow-up response after the tool result lands in
              context.
         """
-        # 1. Deterministic ack starts speaking immediately.
+        # 1. Deterministic ack starts speaking immediately, then an audible
+        #    "ding" marks the moment of connection. Order matters: the ding is
+        #    pushed at the same injection point right after the ack, and Piper
+        #    processes frames FIFO, so the user hears the spoken ack first and
+        #    the ding immediately after (not before).
         await params.llm.push_frame(TTSSpeakFrame(_BRIDGE_ACK))
         self._llm.add_assistant_announcement(_BRIDGE_ACK)
+        for _f in _ding_frames():
+            await params.llm.push_frame(_f)
 
         # 2. Side effect — dial the agent the user named, or the env default.
         agent_selector = str(params.arguments.get("agent") or "").strip()
@@ -510,20 +585,37 @@ class SpeechPipeline:
         asyncio.create_task(self._close_session_after_speak(_END_CONVERSATION_ACK))
 
     async def _close_session_after_speak(self, text: str) -> None:
-        """Wait for the goodbye TTS to play, then close the WebSocket.
+        """Wait for the goodbye (and any in-flight audio) to actually play, then
+        close the WebSocket.
 
-        Timing is estimated, not measured: a short initial delay lets the
-        ``TTSSpeakFrame`` enter the pipeline, then we sleep proportional to
-        word count so playback has time to land at the client, then close.
-        The receive loop in ``endpoint.py`` catches the close and runs the
-        full session teardown.
+        Timing is *measured*, not estimated: we watch ``AudioIO.is_bot_audible()``
+        — which combines the server-side queue/pump with the client's playback
+        horizon — so we don't close while the user is still hearing audio. This
+        prevents chopping a goodbye (or an earlier reply still draining) mid-word,
+        which a fixed word-count sleep did whenever the TTS queue was backed up.
+        The receive loop in ``endpoint.py`` catches the close and runs the full
+        session teardown.
         """
-        # Initial beat for the frame to enter the pipeline + Piper to start.
-        await asyncio.sleep(0.4)
-        # ~400ms/word at average TTS rate + a 0.5s tail to flush AudioIO's coalesce.
-        word_count = max(1, len(text.split()))
-        synthesis_and_playback = min(0.4 * word_count + 0.5, 8.0)
-        await asyncio.sleep(synthesis_and_playback)
+        loop = asyncio.get_running_loop()
+
+        # 1. Let the goodbye frame enter the pipeline + Piper begin synthesising.
+        await asyncio.sleep(0.3)
+
+        # 2. Wait (briefly) for audio to actually start reaching the client, in
+        #    case Piper's first-chunk latency means nothing is audible yet.
+        start_deadline = loop.time() + 5.0
+        while not self._audio.is_bot_audible() and loop.time() < start_deadline:
+            await asyncio.sleep(0.05)
+
+        # 3. Drain: hold the socket open until the user has finished hearing the
+        #    audio (goodbye + anything still queued), capped so a stuck pump
+        #    can't wedge the close forever.
+        drain_deadline = loop.time() + 12.0
+        while self._audio.is_bot_audible() and loop.time() < drain_deadline:
+            await asyncio.sleep(0.1)
+
+        # 4. Small tail so the final coalesced downlink bundle lands client-side.
+        await asyncio.sleep(0.3)
         if not self._alive():
             return
         try:

@@ -11,10 +11,12 @@ from .audio_io import AudioIO
 from .endpoint import developer_websocket_endpoint
 from .stt import preload_vosk_model
 from .tts import preload_piper_voice
+from .vad import preload_silero_vad
 
 __all__ = [
     "AudioIO",
     "developer_websocket_endpoint",
     "preload_vosk_model",
     "preload_piper_voice",
+    "preload_silero_vad",
 ]

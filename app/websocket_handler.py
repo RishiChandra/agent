@@ -622,8 +622,13 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                             
                             if should_proceed_to_close:
                                 print("🎤 Goodbye turn complete, waiting for audio playback to finish...")
-                                # Wait for playback queue to be empty and playback task to complete
-                                max_wait_iterations = 100  # Maximum wait iterations (10 seconds at 0.1s per iteration)
+                                # Wait for the playback queue to drain, but cap it tightly.
+                                # A short goodbye ("...have a wonderful day!") is ~2s of audio,
+                                # so 3s is ample; the old 10s cap + 1s tail meant that whenever
+                                # is_playing() stayed stuck the socket was held ~11s, which in turn
+                                # stalled the orchestrator's "you're back with me now" prompt (it
+                                # can only speak once this side actually closes).
+                                max_wait_iterations = 30  # 3.0s at 0.1s per iteration
                                 wait_iterations = 0
                                 while audio_manager.is_playing():
                                     if wait_iterations >= max_wait_iterations:
@@ -631,8 +636,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                         break
                                     wait_iterations += 1
                                     await asyncio.sleep(0.1)
-                                # Give a small additional delay to ensure audio is fully sent to client
-                                await asyncio.sleep(1.0)  # Increased delay to ensure audio is fully played
+                                # Small tail so the last audio flush reaches the client.
+                                await asyncio.sleep(0.3)
                                 print("✅ Goodbye audio playback complete, closing connection")
                                 try:
                                     await websocket.send_text(json.dumps({
