@@ -2,6 +2,8 @@ import json
 import os
 from types import SimpleNamespace
 
+LLM_TIMEOUT_MS = int(os.environ.get("LLM_TIMEOUT_MS", "15000"))
+
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -179,7 +181,9 @@ def get_gemini_client():
             "Missing GEMINI_API_KEY or GOOGLE_API_KEY environment variable. "
             "Set one of them in .env to use the Gemini API."
         )
-    return genai.Client(api_key=api_key)
+    # Hard request timeout: a stalled generateContent (seen: 20 s on a grounded
+    # query) serialises every later turn behind it in the voice pipeline.
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=LLM_TIMEOUT_MS))
 
 
 def get_model_name():

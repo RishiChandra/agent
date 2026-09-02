@@ -1,5 +1,6 @@
 import os
 from google import genai
+from google.genai import types
 from google.genai.types import (
     Behavior,
     LiveConnectConfig,
@@ -27,7 +28,8 @@ PROJECT_ID = "ai-pin-465902"
 LOCATION = "us-central1"
 # Live API (bidiGenerateContent): use Google AI model ID, not Vertex "gemini-live-*"
 MODEL = "gemini-3.1-flash-live-preview"
-client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"],
+                      http_options=types.HttpOptions(timeout=int(os.environ.get("LLM_TIMEOUT_MS", "15000"))))
 
 # ===== Audio Config =====
 FORMAT = "pcm"
