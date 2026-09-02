@@ -52,6 +52,8 @@ async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> No
     pipeline = SpeechPipeline(websocket, user_id, utterance, audio, scratchpad, bridge)
     await pipeline.start()
     registry.register(user_id, pipeline)
+    # Audible "you're connected to the orchestrator" cue as the session opens.
+    await pipeline.play_connect_ding()
 
     try:
         await _receive_loop(websocket, user_id, audio, utterance, vad, pipeline, bridge)
