@@ -1,61 +1,32 @@
-# Git
-.git
-.gitignore
-
-# Python
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-env
-pip-log.txt
-pip-delete-this-directory.txt
-.tox
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-.git
-.mypy_cache
-.pytest_cache
-.hypothesis
-
-# Virtual environments
-venv/
-ENV/
-env/
-.venv/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Azure deployment files
-.deployment
-.startup
-app.zip
-*.zip
-
-# Testing
-test_ws.py
-testing/
-
-# Documentation
-readme.md
-README.md
+# Allow only inputs used by the backend image.
+**
+!Dockerfile
+!requirements.txt
+!requirements-oci.lock
+!app/
+!app/**
+!agent_directory/
+!agent_directory/**
+!listener/
+!listener/*.py
+!deploy/
+!deploy/app_backend/
+!deploy/app_backend/*.py
+# Exclusions below override allowed source directories.
+**/.env
+**/.env.*
+**/*secret*
+**/*credential*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.sql
+**/*.dump
+**/*.log
+**/__pycache__/
+**/*.pyc
+**/.git/
+**/data/
+**/*.onnx
+**/node_modules/

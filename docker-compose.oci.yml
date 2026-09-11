@@ -1,0 +1,93 @@
+# App backend only; no database, SQL worker or broker is created here.
+# The app reaches host PostgreSQL over a fixed-subnet bridge: DB_HOST=172.30.0.1
+# (the gateway). PostgreSQL listens on that address and pg_hba.conf allows only
+# appuser from 172.30.0.0/24. The network is external so it outlives
+# `compose down` and exists whenever Docker is up (PostgreSQL binds it at start).
+# One-time setup on the host (POSTGRES_MIGRATION_PLAN.md Step 3):
+#   docker network create --driver bridge --subnet 172.30.0.0/24 --gateway 172.30.0.1 app-backend
+networks:
+  default:
+    name: app-backend
+    external: true
+  # Existing Caddy network. Caddy's reverse_proxy upstream is app-main:8000.
+  edge:
+    name: aipin_default
+    external: true
+
+services:
+  app:
+    image: ${APP_IMAGE:?Set an immutable backend image tag}
+    platform: linux/arm64
+    env_file:
+      - ${APP_ENV_FILE:?Set an absolute private environment file path}
+    environment:
+      PORT: "8000"
+      VOSK_MODEL_PATH: /models/vosk-model-en-us-0.22-lgraph
+      PIPER_MODEL_PATH: /models/piper_voices/en_US-amy-medium.onnx
+    ports:
+      - "127.0.0.1:${APP_BIND_PORT:-18000}:8000"
+    networks:
+      default: {}
+      edge:
+        aliases: [app-main]
+    volumes:
+      - type: bind
+        source: ${APP_MODELS_DIR:?Set an absolute verified models directory}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEMORY_LIMIT:-3g}
+    pids_limit: 256
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Job-queue worker: polls the `jobs` table in the same database and wakes the
+  # device over MQTT (Mosquitto on the edge network, plaintext 1883 inside Docker).
+  worker:
+    image: ${APP_IMAGE:?Set an immutable backend image tag}
+    platform: linux/arm64
+    command: ["python", "/app/listener/worker.py"]
+    # The image's HEALTHCHECK probes /healthz, which the worker does not serve.
+    healthcheck:
+      disable: true
+    env_file:
+      - ${APP_ENV_FILE:?Set an absolute private environment file path}
+    environment:
+      MQTT_HOST: ${MQTT_HOST:-mosquitto}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+    networks:
+      default: {}
+      edge: {}
+    cpus: ${WORKER_CPUS:-0.25}
+    mem_limit: ${WORKER_MEMORY_LIMIT:-256m}
+    pids_limit: 64
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=16m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
