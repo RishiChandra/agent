@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
 """
-Simple script to send a scheduled message to Azure Service Bus queue.
+Insert a scheduled task job into the Postgres `jobs` table so listener/worker.py
+picks it up (replaces the old Azure Service Bus test script).
 
 Usage:
     python quick_enqueue.py <minutes>
-    (schedules message for specified minutes from now)
+    (schedules the job for the specified minutes from now)
+
+Reads DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD from the environment / .env.
 """
 
 import os
 import sys
-import json
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from psycopg2.extras import Json
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # listener/
+from database import get_db_connection  # noqa: E402
 
 load_dotenv()
-
-
-try:
-    from azure.servicebus import ServiceBusClient, ServiceBusMessage
-except ImportError:
-    print("Error: azure-servicebus package not installed.")
-    print("Install it with: pip install azure-servicebus")
-    sys.exit(1)
 
 
 def main():
@@ -30,54 +28,41 @@ def main():
         print("Usage: python quick_enqueue.py <minutes>")
         print("Example: python quick_enqueue.py 5")
         sys.exit(1)
-    
-    now_utc = datetime.now(UTC)
-    USER_ID = "4dd16650-c57a-44c4-b530-fc1c15d50e45"
-    TASK_ID = "253b01f6-67f9-4696-82d3-20581e0926d0"
-    message_contents = {
-        "turns": {
-            "task": {
-                "task_id": TASK_ID,
-                "user_id": USER_ID,
-                "task_info": {"info": "Take my medicine"},
-                "time_to_execute": "2026-01-29T10:00:00Z"
-            },
-            "message": "Tell the user that it is time for them to complete this task now"
-        },
-        "turn_complete": True
-    }
 
-    message_content = json.dumps(message_contents)
-    
     try:
         minutes = int(sys.argv[1])
     except ValueError:
         print("Error: minutes must be a number")
         sys.exit(1)
-    
-    connection_string = os.getenv("AZURE_SERVICEBUS_CONNECTION_STRING")
-    if not connection_string or not connection_string.strip():
-        print("Error: AZURE_SERVICEBUS_CONNECTION_STRING environment variable not set or empty")
-        print("Set it in your .env file or environment variables")
-        sys.exit(1)
-    
-    connection_string = connection_string.strip()
-    if not connection_string.startswith("Endpoint="):
-        print("Error: Connection string appears to be malformed")
-        print("Expected format: Endpoint=sb://...")
-        sys.exit(1)
-    
-    scheduled_time = now_utc + timedelta(minutes=minutes)
-    
+
+    USER_ID = "4dd16650-c57a-44c4-b530-fc1c15d50e45"
+    TASK_ID = "253b01f6-67f9-4696-82d3-20581e0926d0"
+    # Same shape app/enqueue/task_enqueue.prepare_message_contents produces.
+    payload = {
+        "task_id": TASK_ID,
+        "user_id": USER_ID,
+        "pending_task": True,
+        "pending_message": False,
+        "title": "Take my medicine",
+        "description": "Take my medicine",
+    }
+    scheduled_time = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+    conn = get_db_connection()
     try:
-        with ServiceBusClient.from_connection_string(connection_string) as client:
-            with client.get_queue_sender("q1") as sender:
-                message = ServiceBusMessage(message_content)
-                sender.schedule_messages(message, scheduled_time)
-                print(f"✅ Message scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO jobs (kind, payload, deliver_at) VALUES (%s, %s, %s) RETURNING id",
+                    ("task", Json(payload), scheduled_time),
+                )
+                job_id = cur.fetchone()[0]
+        print(f"✅ Job {job_id} scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

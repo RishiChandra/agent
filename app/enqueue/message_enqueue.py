@@ -1,12 +1,12 @@
 """
 Message enqueue operations for the AI/chip flow.
-Enqueues "text_message" jobs to Azure Service Bus so the listener will
-fetch unread messages and send them to the chip via MQTT.
+Inserts "text_message" jobs into the Postgres `jobs` table so listener/worker.py
+will wake the chip over MQTT (pending_messages: true) and the websocket handler
+then reads the unread messages.
 Deduplicates by user: at most one pending text_message job per user.
 Messages are scheduled for 1 minute later (not immediately).
 """
 import os
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
@@ -17,15 +17,9 @@ if _app_path not in sys.path:
     sys.path.insert(0, _app_path)
 
 from database import execute_query, execute_update
+from enqueue.task_enqueue import insert_job
 
-try:
-    from enqueue.task_enqueue import get_service_bus_client
-    from azure.servicebus import ServiceBusMessage
-except ImportError:
-    get_service_bus_client = None
-    ServiceBusMessage = None
-
-# Queue used by the listener (same as task queue)
+# Kept for call-site compatibility; the Postgres queue has a single table.
 MESSAGE_QUEUE_NAME = "q1"
 
 # Table used to ensure only one pending text_message job per user.
@@ -97,16 +91,16 @@ def enqueue_text_message(
     queue_name: str = MESSAGE_QUEUE_NAME,
 ) -> Dict[str, Any]:
     """
-    Enqueue a text_message job for the listener so the AI will respond in the chip.
+    Enqueue a text_message job for the worker so the AI will respond in the chip.
     Check first: if any message is already pending for this user_id, do not enqueue.
     If no message is pending, claim a slot (insert) and enqueue.
-    Message is scheduled for 1 minute later.
+    Job is scheduled for 1 minute later.
 
     Args:
         user_id: User who sent the message.
         chat_id: Chat the message belongs to.
         message_id: Optional message UUID (included in payload when provided).
-        queue_name: Service Bus queue name (default: q1).
+        queue_name: Unused; kept so existing call sites keep working.
 
     Returns:
         Dict with success, message, and optionally enqueued=True/False.
@@ -121,10 +115,6 @@ def enqueue_text_message(
             "message": "Text message job already pending for this user; skipped duplicate.",
         }
 
-    if get_service_bus_client is None or ServiceBusMessage is None:
-        print("Warning: Azure Service Bus not available; text message not enqueued.")
-        return {"success": False, "enqueued": False, "message": "Service Bus not available."}
-
     payload = {
         "message_type": "text_message",
         "user_id": user_id,
@@ -134,20 +124,17 @@ def enqueue_text_message(
     }
     if message_id is not None:
         payload["message_id"] = message_id
-    body = json.dumps(payload)
     scheduled_time = datetime.now(timezone.utc) + timedelta(minutes=1)
     print(f"[DEBUG] enqueue_text_message user_id={user_id} chat_id={chat_id} message_id={message_id} scheduling at {scheduled_time.isoformat()}")
 
     try:
-        with get_service_bus_client() as client:
-            with client.get_queue_sender(queue_name) as sender:
-                message = ServiceBusMessage(body, scheduled_enqueue_time_utc=scheduled_time)
-                sender.send_messages(message)
-        print(f"[DEBUG] enqueue_text_message user_id={user_id} chat_id={chat_id} enqueued to Service Bus (scheduled)")
+        job_id = insert_job("text_message", payload, scheduled_time)
+        print(f"[DEBUG] enqueue_text_message user_id={user_id} chat_id={chat_id} enqueued (job_id={job_id})")
         return {
             "success": True,
             "enqueued": True,
             "message": "Text message job enqueued.",
+            "job_id": job_id,
         }
     except Exception as e:
         print(f"[DEBUG] Error enqueueing text_message user_id={user_id} chat_id={chat_id}: {e}")

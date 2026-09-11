@@ -31,10 +31,6 @@ piper-tts
 # version gates onnxruntime behind the extra again.
 pipecat-ai[silero]>=1.2,<1.3
 
-# Azure (device SDK has wheels; service SDK optional, see below)
-azure-servicebus
-azure-iot-device
-
-# Optional: install only if you need IoT Hub service-side (C2D, direct methods).
-# On macOS/Python 3.12+ it often fails to build due to uamqp requiring CMake.
-# pip install azure-iot-hub
+# MQTT — listener/worker.py publishes device wake commands to Mosquitto
+# (replaced Azure Service Bus + IoT Hub; see SCHEDULER_DEPLOYMENT_PLAN_OCI.md)
+paho-mqtt>=2.1

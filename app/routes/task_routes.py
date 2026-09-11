@@ -12,6 +12,7 @@ from .task_crud import (
     delete_task
 )
 from enqueue.task_enqueue import enqueue_task as enqueue_task_to_service_bus
+from enqueue.edit_task_enqueue import cancel_scheduled_task_for_task_id_safe
 
 # Create router for all endpoints
 router = APIRouter()
@@ -200,12 +201,14 @@ async def update_task_endpoint(user_id: str, task_id: str, request: TaskUpdateRe
                 print(f"Warning: Failed to set timezone for time_to_execute: {e}")
                 # Fall back to original value
         
-        # Update task
+        # Update task and keep the job queue in sync: a changed time/info re-enqueues,
+        # status=completed cancels the pending job (same as the voice edit tool).
         task = update_task(
             task_id=task_id,
             task_info=request.task_info,
             status=request.status,
-            time_to_execute=time_to_execute_final
+            time_to_execute=time_to_execute_final,
+            reenqueue=True,
         )
         
         return task
@@ -240,6 +243,11 @@ async def delete_task_endpoint(user_id: str, task_id: str):
         if existing_task["user_id"] != user_id:
             raise HTTPException(status_code=403, detail="Task does not belong to this user")
         
+        # Cancel the pending reminder job before the row goes away, so the worker
+        # cannot wake the device for a task that no longer exists.
+        if cancel_scheduled_task_for_task_id_safe is not None:
+            cancel_scheduled_task_for_task_id_safe(task_id, user_id)
+
         # Delete task
         deleted = delete_task(task_id)
         if not deleted:
