@@ -90,6 +90,14 @@ scanners), while the device credentials and ACL have existed since 2026-09-01. T
 - [ ] Apply the schema to `ai_pin_db`, flip `DB_NAME`, `compose up -d`. Reminders now work for any device subscribed to Mosquitto.
 - [ ] Update the [app plan component map](APP_BACKEND_DEPLOYMENT_PLAN_OCI.md#component-map-everything-in-the-audit-moves-to-oci) rows 3–4 to done.
 
+### Public-path proof (2026-09-11 07:55 UTC, no device needed)
+
+A `mosquitto_sub` stand-in using the **device** credentials connected to `146-235-229-232.sslip.io:8883` with the TLS chain
+verified against the system CA store (certificate `CN=146-235-229-232.sslip.io`, Let's Encrypt, valid to 2026-11-30); a
+`mosquitto_pub` with the backend credentials over the same public port delivered `{"command":"start_websocket",...}` to it;
+a publish by the device user outside `aipin/esp32s3/#` was dropped by the ACL; no retained test payload was left on the topic.
+Everything the chip needs to do is therefore exercised end to end except the chip itself.
+
 ### 5. Device
 
 - [ ] Find the firmware repository. Check what it speaks today (IoT Hub SDK vs generic MQTT) and whether an MQTT/Mosquitto
