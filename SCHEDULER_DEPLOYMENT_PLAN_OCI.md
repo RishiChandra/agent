@@ -1,0 +1,139 @@
+# Scheduler deployment plan and status — OCI
+
+Written 2026-09-11. Replaces audit components 3 (Service Bus `q1`), 4 (Function App `listener`) and 5 (IoT Hub) with a
+PostgreSQL job table, a worker container and the Mosquitto broker already running on the VM. Source for most of the
+server half: branch [`oracle-deploy`](https://github.com/RishiChandra/agent/tree/oracle-deploy) (commit `0a9ac69`, one
+commit on top of `main`'s `14f7e5c`), which built the stale stack deleted on 2026-09-11.
+
+## What the `oracle-deploy` branch gives us
+
+| Take | File | What it is |
+|---|---|---|
+| Yes | `deploy/sql/001_jobs.sql` | `jobs` table: `id BIGSERIAL` (stored in `tasks.enqueue_sequence_id`), `kind` task/text_message, `payload JSONB`, `deliver_at`, `done_at`, `attempts`; partial index on pending rows |
+| Yes | `listener/worker.py` | Poll loop (2 s, batch 10, `FOR UPDATE SKIP LOCKED`), same session-active rule as `function_app.py` (defer 1 min), publishes the wake command, 5 attempts then give up, transport errors retried without spending an attempt |
+| Yes | `listener/mqtt_publish.py` | `send_to_device(device_id, payload)` via paho-mqtt to `{prefix}/{device_id}/cmd`, retained, QoS 1; TLS/plaintext auto by port |
+| Yes | `app/enqueue/task_enqueue.py`, `edit_task_enqueue.py`, `message_enqueue.py` | Same public functions and return shapes as `main`; `insert_job`/`cancel_job` replace Service Bus schedule/cancel; `sequence_id` = `jobs.id` |
+| Yes | `paho-mqtt>=2.1` | The only new dependency |
+| Already on VM | `deploy/mosquitto/{mosquitto.conf,acl,passwd,certs/,certsync.sh}` | Broker config: TLS 8883 for the device with Caddy's Let's Encrypt cert (cron copies it every 10 min), plaintext 1883 inside Docker for the worker, `allow_anonymous false`, ACL: backend user `#`, device user `aipin/esp32s3/#` |
+| **No** | `app/websocket_handler.py`, `app/main.py` | The branch predates `main`'s goodbye-timing fixes and Silero preload; taking them would regress `main` |
+| No | `requirements.txt` pins, `docker-compose.yml`, `deploy/deploy.sh`, `restore_db.sh`, `download_models.sh` | Superseded by `requirements-oci.lock`, `docker-compose.oci.yml` and the current VM layout |
+| No | Kairos `agent_url = ws://app:8000/...` rewrite | Written because "OCI's public IPv4 does not hairpin from the VM"; verified 2026-09-11 that it does now (container → public hostname → 200, and a real Kairos handoff succeeded through `wss://146-235-229-232.sslip.io`). Keep the public URL; revisit only if the hostname changes |
+
+## Device contract (from the branch README, unchanged wire protocol)
+
+| Item | Value |
+|---|---|
+| Broker | `MQTT_TLS_HOST` = `146-235-229-232.sslip.io`, port `8883`, TLS with a public Let's Encrypt certificate (no custom CA on the device) |
+| Credentials | username `esp32s3` (`MQTT_DEVICE_USERNAME`), password `MQTT_DEVICE_PASSWORD` from the VM's private env |
+| Subscribe | `aipin/esp32s3/cmd`, retained, QoS 1 (a sleeping LTE device gets the last command on reconnect) |
+| Payloads | Same JSON IoT Hub C2D sent: `{"command":"start_websocket","reason":"session_inactive",...}` and `{"command":"start_websocket","reason":"text_message","pending_messages":true,...}` |
+| WebSocket | unchanged: `wss://<host>/ws/{user_id}` |
+
+**What the branch does not answer: whether the firmware was ever changed to use this.** IoT Hub's device MQTT uses a
+different username format, SAS-token auth and the `devices/{id}/messages/devicebound/#` topic, so a firmware change is
+required. Evidence it has not happened: Mosquitto logged no device connection in the 7 days before cutover (only internet
+scanners), while the device credentials and ACL have existed since 2026-09-01. The firmware repository location is still unknown.
+
+## Steps
+
+### 1. Port the server half onto `codex/oci-application-main`
+
+- [ ] Copy from `origin/oracle-deploy`: `deploy/sql/001_jobs.sql`, `listener/worker.py`, `listener/mqtt_publish.py`,
+  `app/enqueue/task_enqueue.py`, `app/enqueue/edit_task_enqueue.py`, `app/enqueue/message_enqueue.py`.
+  Diff each enqueue file against `main` first; the branch's versions were written against `main`'s call sites, but confirm
+  `task_routes.py`/`task_crud.py`/`messaging_routes.py` and the Gemini create/edit-task tools still see the same return keys.
+- [ ] Delete the Azure listener files that no longer have a runtime: `listener/function_app.py`, `iot_hub_mqtt.py`,
+  `function.json`, `host.json`, `.funcignore`, `listener/__init__.py` stub. Keep `listener/database.py` and
+  `session_management_utils.py` (the worker imports them). Remove `azure-servicebus`/`azure-iot-device` from
+  `requirements.txt`, add `paho-mqtt>=2.1`, regenerate `requirements-oci.lock` on the VM (arm64) and rebuild.
+- [ ] Dockerfile/.dockerignore: also copy `listener/*.py` into the image (`/app/listener`), nothing else from that directory.
+- [ ] `docker-compose.oci.yml`: add a `worker` service on the same image, `command: ["python", "/app/listener/worker.py"]`,
+  same `env_file`, networks `default` (DB) + `edge` (broker, `MQTT_HOST=mosquitto`, `MQTT_PORT=1883`), no ports, no models
+  mount, `restart: unless-stopped`, small limits (0.25 CPU / 256 MB), read-only root. Add a liveness check later if the loop
+  ever wedges (the branch has none).
+- [ ] Private env additions (the user runs this; the classifier blocks me from editing the secrets file): copy
+  `MQTT_USERNAME`, `MQTT_PASSWORD`, `MQTT_COMMAND_TOPIC_PREFIX`, `DEVICE_ID`, `WORKER_POLL_INTERVAL_SEC` from
+  `/home/ubuntu/agent/deploy/.env` into `/home/ubuntu/app-backend-config/backend.env`, plus `MQTT_HOST=mosquitto`,
+  `MQTT_PORT=1883`. Do **not** set `AZURE_SERVICEBUS_CONNECTION_STRING`.
+
+**Complete when:** the image builds with the worker entrypoint and `python -c "import paho.mqtt, listener"` style imports pass.
+
+### 2. Schema
+
+- [ ] Apply `001_jobs.sql` to `agent_rehearsal` as `appuser` (owner), then, after Step 3 passes, to `ai_pin_db`.
+  The worker also calls `ensure_jobs_table()` at start, so this is belt and braces.
+- [x] Decision 2026-09-11: **delete** the 5 past-due tasks carrying Service Bus sequence ids (1588–1598, due May 2026).
+  Done in both `ai_pin_db` and `agent_rehearsal` after dump `ai_pin_db-pretaskdelete-<ts>.dump`. Nothing to migrate from `q1`.
+  One task created by the user's 2026-09-11 test remains in `ai_pin_db` (due 2026-09-11 14:00 UTC, `enqueue_sequence_id` NULL
+  because the app ran without a queue); Step 4 must insert a job for any future task with a NULL sequence id.
+- [x] `001_jobs.sql` applied to `agent_rehearsal` as `appuser` (table, sequence and index owned by `appuser`).
+
+### 3. Test on `agent_rehearsal` with a fake device
+
+- [ ] Point the app + worker at `agent_rehearsal` (`DB_NAME`), start both.
+- [ ] On the VM, subscribe as the device: `mosquitto_sub` (from the `eclipse-mosquitto` image) to `aipin/esp32s3/cmd` on
+  `8883` with the device credentials, TLS verified against the system CAs. This stands in for the firmware.
+- [ ] `POST /tasks` with `time_to_execute` 1 minute ahead → `jobs` row with `deliver_at`; `tasks.enqueue_sequence_id` = its id.
+  After the minute: worker log shows the claim and publish; the subscriber prints `{"command":"start_websocket","reason":"session_inactive",...}`;
+  `done_at` set.
+- [ ] Session-active rule: set the user's `sessions.is_active` true, repeat → worker defers by 1 minute, no publish; clear it → publish.
+- [ ] Edit (`PUT /tasks` with `reenqueue`) cancels the old job and inserts a new one; `DELETE` cancels.
+- [ ] `POST /messages` → `text_message` job 1 minute later → wake with `pending_messages: true`; dedupe (second message
+  while one is pending does not add a job).
+- [ ] Failure path: stop Mosquitto briefly → job retried without spending an attempt; restart → delivered.
+- [ ] Record memory/CPU of the worker.
+
+**Complete when:** every row above passes and the test rows are removed.
+
+### 4. Go live on `ai_pin_db`
+
+- [ ] Apply the schema to `ai_pin_db`, flip `DB_NAME`, `compose up -d`. Reminders now work for any device subscribed to Mosquitto.
+- [ ] Update the [app plan component map](APP_BACKEND_DEPLOYMENT_PLAN_OCI.md#component-map-everything-in-the-audit-moves-to-oci) rows 3–4 to done.
+
+### 5. Device
+
+- [ ] Find the firmware repository. Check what it speaks today (IoT Hub SDK vs generic MQTT) and whether an MQTT/Mosquitto
+  variant already exists (the 2026-09-01 credentials suggest someone started it).
+- [ ] Implement/flash: broker `146-235-229-232.sslip.io:8883`, TLS with the public CA bundle, username `esp32s3`, password from
+  the VM env, subscribe `aipin/esp32s3/cmd`; keep the payload handler. WebSocket URL → the OCI hostname.
+- [ ] End-to-end: create a reminder from the site, device wakes and connects to `wss://…/ws/{user_id}`.
+- [ ] Only then retire Azure Service Bus `ai-pin`, Function App `listener` (+ storage `aipin93a7`), IoT Hub `ai-pin-iot-hub`.
+
+**Blocked on:** firmware repo location and its current transport. Nothing in Steps 1–4 depends on it.
+
+### Coupled to the stable-address step
+
+`MQTT_TLS_HOST` and the certificate Mosquitto presents follow the public hostname. When the IP/hostname changes, update
+`MQTT_TLS_HOST` (and `SITE_HOST_*`) in the old `deploy/.env`, let Caddy issue the new cert, `certsync.sh` copies it, and the
+firmware's broker hostname changes with it. Do the hostname change before flashing the device.
+
+## Status
+
+- [x] Server-half source identified and reviewed (branch `oracle-deploy`).
+- [x] Device MQTT contract documented; firmware status unknown.
+- [x] Step 1 (2026-09-11 UTC): code ported to the branch (six files from `oracle-deploy`; Azure listener files and packages
+  removed; `paho-mqtt==2.1.0` in requirements and lock; `listener/*.py` baked into the image; `worker` service in
+  `docker-compose.oci.yml`). Image `codex-app-backend:step4-94fa561471da` built; no Azure packages inside; worker imports pass.
+  **Two fixes to `main` found by the tests:** the HTTP `PUT /tasks/{user}/{id}` never passed `reenqueue=True` and
+  `DELETE` never cancelled the queued job (only the voice edit tool did), so an edited or deleted task would still wake the
+  device at the old time. Fixed in `app/routes/task_routes.py`; and `listener/worker.py` now drops a task job whose task was
+  deleted or is no longer `pending` as a safety net.
+- [x] Step 2: schema on `agent_rehearsal` and on `ai_pin_db` (owner `appuser`); stale tasks deleted.
+- [x] Step 3 (2026-09-11 07:15 UTC): fake-device suite `sched_test.sh` (kept in the VM build directory), 20/20 checks:
+  task → job → worker → `mosquitto_sub` as `esp32s3` received `start_websocket/session_inactive` with the task as `system_message`;
+  active session defers by 1 min then delivers when inactive; edit cancels the old job and inserts a new one; delete cancels;
+  text message → one `text_message` job (+1 min), second message deduped, device received `pending_messages: true`;
+  broker stopped → job stays pending with `attempts=0`, delivered after broker restart. Worker 18 MiB / idle CPU.
+  Test containers and rows removed; the retained command on the topic was cleared so no real device sees test payloads.
+
+- [x] Step 4 (2026-09-11 07:45 UTC): **live.** The user appended the five MQTT/worker lines to the private env; `compose up -d`
+  with `codex-app-backend:step4-94fa561471da` started `app-backend-worker-1` (networks `app-backend` + `aipin_default`,
+  `mosquitto:1883`, device `esp32s3`, poll 2 s) and recreated the app on the same image; public `/healthz` 200 throughout.
+  The one future task ("brush my teeth", due 2026-09-11 14:00 UTC) was re-enqueued through `PUT /tasks` and now has job #1.
+  The worker service has `healthcheck: disable: true` because the image's HTTP probe does not apply to it.
+  Reminders now work for any device subscribed to Mosquitto; the real device is still on IoT Hub (Step 5).
+- [ ] Step 5: firmware, then retire Azure queue/listener/IoT Hub. **Blocked on the firmware repository.**
+
+Operational notes: worker logs via `docker logs app-backend-worker-1`; pending work via `SELECT * FROM jobs WHERE done_at IS NULL`;
+a stuck job can be re-armed with `UPDATE jobs SET deliver_at = now() WHERE id = …`. `deploy/sql/001_jobs.sql` is not in the image
+(the worker logs that it assumes the table exists); apply it by hand for any new database.
