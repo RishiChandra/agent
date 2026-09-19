@@ -118,7 +118,14 @@ attached for a persistent subscription costs essentially nothing extra — a str
   via the live public app fired through the worker and the wake arrived **live** on `aipin/esp32s3/cmd` ~72 s later (a 70 s
   scheduled delay, i.e. on time). Payload exactly what the firmware parses.
 - [ ] **Flash the device** (UART0 only — USB-C is power-only on this board), then `mqtt_set <MQTT_DEVICE_PASSWORD>` on the
-  serial console (the password from the VM's `deploy/.env`, never in source), reboot.
+  serial console (the password from the VM's `deploy/.env`, never in source), reboot. Read the device password (username
+  `esp32s3`; the broker ACL restricts it to `aipin/esp32s3/#`) straight from the VM so it never lands in a doc or chat:
+
+  ```sh
+  ssh -i /Users/rishi/projects/keys/agent/id_ed25519 ubuntu@146.235.229.232 'grep ^MQTT_DEVICE_PASSWORD= /home/ubuntu/agent/deploy/.env'
+  ```
+
+  (The backend/worker uses the separate `MQTT_USERNAME`/`MQTT_PASSWORD` in the same file — full-topic access — which the device must NOT use.)
 - [ ] **On-device field test:** create a reminder, confirm the pin rings and connects to `wss://…/ws/{user_id}` at the due time.
   This is the only step that needs the physical device; everything up to the broker is proven.
 - [ ] Only then retire Azure Service Bus `ai-pin`, Function App `listener` (+ storage `aipin93a7`), IoT Hub `ai-pin-iot-hub`.
