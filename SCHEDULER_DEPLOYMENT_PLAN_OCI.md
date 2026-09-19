@@ -23,7 +23,7 @@ commit on top of `main`'s `14f7e5c`), which built the stale stack deleted on 202
 
 | Item | Value |
 |---|---|
-| Broker | `MQTT_TLS_HOST` = `146-235-229-232.sslip.io`, port `8883`, TLS with a public Let's Encrypt certificate (no custom CA on the device) |
+| Broker | `2603-c024-c020-3700-0-537e-9221-8587.sslip.io:8883` (the **v6/AAAA** sslip name — the device is IPv6-only on LTE), TLS with a public Let's Encrypt cert (no custom CA on the device). Server `MQTT_TLS_HOST` was switched to this v6 name on 2026-09-19 so mosquitto presents the matching cert |
 | Credentials | username `esp32s3` (`MQTT_DEVICE_USERNAME`), password `MQTT_DEVICE_PASSWORD` from the VM's private env |
 | Subscribe | `aipin/esp32s3/cmd`, retained, QoS 1 (a sleeping LTE device gets the last command on reconnect) |
 | Payloads | Same JSON IoT Hub C2D sent: `{"command":"start_websocket","reason":"session_inactive",...}` and `{"command":"start_websocket","reason":"text_message","pending_messages":true,...}` |
@@ -100,12 +100,34 @@ Everything the chip needs to do is therefore exercised end to end except the chi
 
 ### 5. Device
 
-- [ ] Find the firmware repository. Check what it speaks today (IoT Hub SDK vs generic MQTT) and whether an MQTT/Mosquitto
-  variant already exists (the 2026-09-01 credentials suggest someone started it).
-- [ ] Implement/flash: broker `146-235-229-232.sslip.io:8883`, TLS with the public CA bundle, username `esp32s3`, password from
-  the VM env, subscribe `aipin/esp32s3/cmd`; keep the payload handler. WebSocket URL → the OCI hostname.
-- [ ] End-to-end: create a reminder from the site, device wakes and connects to `wss://…/ws/{user_id}`.
+**Firmware repo:** github.com/itismejy/ai_pin, branch `modem-lte` (ESP-IDF, ESP32-S3, SIM7670G LTE). Investigated 2026-09-19.
+
+Finding: the firmware was **outbound-call-only** — a WSS session opened only on an ACTION button hold; it shipped **no MQTT
+client at all** (verified: `main/idf_component.yml` has no esp-mqtt; three adversarial searches found no server-reachable wake
+path). So the deployed scheduler reached nothing. The device is on **IPv6-only** T-Mobile PPP, so it dials the v6 sslip name
+(as WSS already does). On this hardware deep sleep saves almost nothing (a ~50 mA R_DUMMY board floor), so keeping the modem
+attached for a persistent subscription costs essentially nothing extra — a straight MQTT push is the simplest fit.
+
+- [x] **Firmware written** (branch `modem-lte-mqtt-wake`, patch delivered): `main/net/wake_mqtt.c` — persistent TLS MQTT
+  subscriber to `aipin/esp32s3/cmd` (QoS 1, cert via `esp_crt_bundle`); on `{"command":"start_websocket"}` it signals the
+  existing call task, placing the same call the ACTION button does (IDLE only; a wake mid-call is dropped). Acts only on LIVE
+  messages — a retained replay on reconnect is ignored as stale. Creds in NVS via a new `mqtt_set` console command.
+- [x] **Server cert fixed:** mosquitto now presents the **v6** Let's Encrypt cert (VM `MQTT_TLS_HOST` → v6 name + certsync);
+  the device's TLS verification of the v6 host now passes. Broker already listens on `[::]:8883`; ip6tables allows it.
+- [x] **End-to-end verified 2026-09-19** with a TLS-verified IPv6 `mosquitto_sub` standing in for the device: a task created
+  via the live public app fired through the worker and the wake arrived **live** on `aipin/esp32s3/cmd` ~72 s later (a 70 s
+  scheduled delay, i.e. on time). Payload exactly what the firmware parses.
+- [ ] **Flash the device** (UART0 only — USB-C is power-only on this board), then `mqtt_set <MQTT_DEVICE_PASSWORD>` on the
+  serial console (the password from the VM's `deploy/.env`, never in source), reboot.
+- [ ] **On-device field test:** create a reminder, confirm the pin rings and connects to `wss://…/ws/{user_id}` at the due time.
+  This is the only step that needs the physical device; everything up to the broker is proven.
 - [ ] Only then retire Azure Service Bus `ai-pin`, Function App `listener` (+ storage `aipin93a7`), IoT Hub `ai-pin-iot-hub`.
+
+**Known caveats to carry:** (1) push only works while the pin is powered with the modem attached — it does NOT survive
+`AT+CPOF`/deep-sleep standby (a poll-on-RTC-timer variant is the fallback if standby-through-reminders is ever needed);
+(2) the `jobs` table keeps delivered rows (`done_at` set) — harmless, but add a periodic prune if it grows;
+(3) the broker leaves the last wake **retained** on the topic; the firmware ignores retained, but clear it if you ever want a
+clean topic.
 
 **Blocked on:** firmware repo location and its current transport. Nothing in Steps 1–4 depends on it.
 
@@ -118,6 +140,7 @@ firmware's broker hostname changes with it. Do the hostname change before flashi
 ## Status
 
 - [x] Server-half source identified and reviewed (branch `oracle-deploy`).
+- [x] Firmware wake path designed + written (github.com/itismejy/ai_pin branch `modem-lte-mqtt-wake`); server cert switched to v6; scheduler→broker path verified end to end 2026-09-19. Flash + on-device field test pending.
 - [x] Device MQTT contract documented; firmware status unknown.
 - [x] Step 1 (2026-09-11 UTC): code ported to the branch (six files from `oracle-deploy`; Azure listener files and packages
   removed; `paho-mqtt==2.1.0` in requirements and lock; `listener/*.py` baked into the image; `worker` service in
@@ -140,7 +163,7 @@ firmware's broker hostname changes with it. Do the hostname change before flashi
   The one future task ("brush my teeth", due 2026-09-11 14:00 UTC) was re-enqueued through `PUT /tasks` and now has job #1.
   The worker service has `healthcheck: disable: true` because the image's HTTP probe does not apply to it.
   Reminders now work for any device subscribed to Mosquitto; the real device is still on IoT Hub (Step 5).
-- [ ] Step 5: firmware, then retire Azure queue/listener/IoT Hub. **Blocked on the firmware repository.**
+- [ ] Step 5: flash the firmware + on-device field test, then retire Azure queue/listener/IoT Hub. (Firmware written; only the physical flash/field-test remain.)
 
 Operational notes: worker logs via `docker logs app-backend-worker-1`; pending work via `SELECT * FROM jobs WHERE done_at IS NULL`;
 a stuck job can be re-armed with `UPDATE jobs SET deliver_at = now() WHERE id = …`. `deploy/sql/001_jobs.sql` is not in the image
