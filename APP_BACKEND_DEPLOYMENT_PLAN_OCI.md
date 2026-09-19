@@ -97,6 +97,36 @@ replacement for what Azure App Service did implicitly (TLS certificate, port 443
 | 5 | IoT Hub `ai-pin-iot-hub` (cloud-to-device MQTT) | Mosquitto (`aipin-mosquitto`, TLS 8883); worker publishes to `aipin/esp32s3/cmd` | Broker live and receiving the worker's commands; **device firmware must switch to it** (blocked on firmware repo) |
 | – | Gemini API | Gemini API | External, unchanged |
 
+### Dual-stack (IPv4 + IPv6) status — verified 2026-09-18
+
+The server accepts connections over **both IPv4 and IPv6**; no change was needed (the dual-stack setup came in with the
+oracle-deploy stack and survived the cutover).
+
+| Layer | IPv4 | IPv6 |
+|---|---|---|
+| VM address | `146.235.229.232` | `2603:c024:c020:3700:0:537e:9221:8587/128` (global, dynamic via RA; exactly matches the sslip v6 name) |
+| Default route | present | present (`via fe80::… proto ra`) |
+| Listeners 80/443/8883 | `0.0.0.0` (docker-proxy) | `[::]` (docker-proxy) |
+| Host firewall | `/etc/iptables/rules.v4` allows 22/80/443/8883 | `/etc/iptables/rules.v6` allows 22/80/443/8883 + ICMPv6 |
+| Caddy vhost | `{$SITE_HOST_V4}` | `{$SITE_HOST_V6}` (same reverse_proxy to `app-main:8000`) |
+| Let's Encrypt cert | issued for the v4 host | **issued for the v6 host** (Sep 1 – Nov 30) |
+| `/healthz` HTTPS | 200 (external, from the Mac) | 200 with a verified cert (hairpin from the VM; the Mac has no IPv6) |
+
+**Why the IPv6 path is proven end-to-end despite no local IPv6 client:** the v6 hostname `2603-…sslip.io` publishes an
+AAAA record only (sslip.io returns no A for a dashed-hex-v6 name). Caddy nevertheless holds a current Let's Encrypt
+certificate for it, which can only be obtained if Let's Encrypt's validators, out on the public internet, connected to the
+VM **over IPv6** on port 80/443 and completed the ACME challenge. That traffic traversed the OCI VCN security list and the
+host ip6tables from the outside, so external inbound IPv6 on 80/443 is confirmed. Caddy renews over the same path (~30 days
+before the Nov 30 expiry), so it stays proven.
+
+Not independently confirmed from outside: **8883 (MQTT) over IPv6** — the host listens on `[::]:8883` and ip6tables allows
+it, but no external v6 client has exercised it and the OCI security-list v6 stanza for 8883 was not read directly (the OCI
+CLI session is expired). This does not matter for the current device contract: `MQTT_TLS_HOST` is the **v4** name
+(`146-235-229-232.sslip.io`), which the IPv6-only LTE device reaches via NAT64. If MQTT ever needs native v6, read the OCI
+security list to confirm an inbound-8883 rule for `::/0` and, if the device dials the v6 name, switch `MQTT_TLS_HOST` to it
+so Mosquitto presents the matching certificate. The probe tooling available here (this Mac, free multi-node checkers) is
+IPv4-only and cannot resolve or reach an AAAA-only name, so a live external v6 probe was not possible from here.
+
 Pre-cutover observation (2026-09-11 UTC): Caddy, the old app and Mosquitto logs show no device or WebSocket traffic in the
 last 72 hours (Mosquitto sees only internet scanners). The device is therefore still using Azure, or is off. Cutting the OCI
 endpoint over affects no live user; the real user-facing switch happens when the device's URL/firmware moves.
