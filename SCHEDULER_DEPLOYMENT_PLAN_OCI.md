@@ -126,9 +126,16 @@ attached for a persistent subscription costs essentially nothing extra — a str
   ```
 
   (The backend/worker uses the separate `MQTT_USERNAME`/`MQTT_PASSWORD` in the same file — full-topic access — which the device must NOT use.)
-- [ ] **On-device field test:** create a reminder, confirm the pin rings and connects to `wss://…/ws/{user_id}` at the due time.
-  This is the only step that needs the physical device; everything up to the broker is proven.
-- [ ] Only then retire Azure Service Bus `ai-pin`, Function App `listener` (+ storage `aipin93a7`), IoT Hub `ai-pin-iot-hub`.
+- [x] **Flashed and provisioned** 2026-09-19: the pin connected to mosquitto as `esp32s3` over TLS 1.2 (broker log
+  `New client connected ... as esp32s3 (k60)`), and correctly ignored the retained wake on subscribe (no spurious call).
+- [x] **On-device field test PASSED 2026-09-19 ~08:47 UTC** with the real cellular pin: a reminder created via the live
+  public app for the device's user (`4dd16650…`, session inactive), due +60 s, fired on time — worker published the wake at
+  08:47:52, and the physical pin opened `/ws/developer/4dd16650…` at 08:47:54 (app log `connected user_id=4dd16650…`).
+  Wake→call-in ~2–3 s (LTE + TLS + WSS); job marked done, 0 retries. Complete path proven: OCI scheduler → Mosquitto →
+  cellular ESP32 → WSS back into the app.
+- [ ] Retire Azure Service Bus `ai-pin`, Function App `listener` (+ storage `aipin93a7`), IoT Hub `ai-pin-iot-hub` — now
+  unblocked; do it after the [before-go-live checklist](APP_BACKEND_DEPLOYMENT_PLAN_OCI.md#before-the-device-goes-live-on-oci)
+  (off-VM backups, reboot check, stable hostname).
 
 **Known caveats to carry:** (1) push only works while the pin is powered with the modem attached — it does NOT survive
 `AT+CPOF`/deep-sleep standby (a poll-on-RTC-timer variant is the fallback if standby-through-reminders is ever needed);
@@ -147,7 +154,9 @@ firmware's broker hostname changes with it. Do the hostname change before flashi
 ## Status
 
 - [x] Server-half source identified and reviewed (branch `oracle-deploy`).
-- [x] Firmware wake path designed + written (github.com/itismejy/ai_pin branch `modem-lte-mqtt-wake`); server cert switched to v6; scheduler→broker path verified end to end 2026-09-19. Flash + on-device field test pending.
+- [x] Firmware wake path written (github.com/itismejy/ai_pin branch `modem-lte-mqtt-wake`); server cert switched to v6.
+- [x] **Full chain LIVE 2026-09-19:** flashed to the real pin, and a live scheduler reminder woke the cellular ESP32 on time
+  (it opened `/ws/developer/…` ~2–3 s after the wake publish). Components 3+4+5 are done on OCI.
 - [x] Device MQTT contract documented; firmware status unknown.
 - [x] Step 1 (2026-09-11 UTC): code ported to the branch (six files from `oracle-deploy`; Azure listener files and packages
   removed; `paho-mqtt==2.1.0` in requirements and lock; `listener/*.py` baked into the image; `worker` service in
@@ -170,7 +179,8 @@ firmware's broker hostname changes with it. Do the hostname change before flashi
   The one future task ("brush my teeth", due 2026-09-11 14:00 UTC) was re-enqueued through `PUT /tasks` and now has job #1.
   The worker service has `healthcheck: disable: true` because the image's HTTP probe does not apply to it.
   Reminders now work for any device subscribed to Mosquitto; the real device is still on IoT Hub (Step 5).
-- [ ] Step 5: flash the firmware + on-device field test, then retire Azure queue/listener/IoT Hub. (Firmware written; only the physical flash/field-test remain.)
+- [x] Step 5: flashed + on-device field test PASSED 2026-09-19 (real pin woke on time from a live reminder).
+- [ ] Retire Azure queue/listener/IoT Hub, after the before-go-live checklist.
 
 Operational notes: worker logs via `docker logs app-backend-worker-1`; pending work via `SELECT * FROM jobs WHERE done_at IS NULL`;
 a stuck job can be re-armed with `UPDATE jobs SET deliver_at = now() WHERE id = …`. `deploy/sql/001_jobs.sql` is not in the image

@@ -94,7 +94,7 @@ replacement for what Azure App Service did implicitly (TLS certificate, port 443
 | 2 | PostgreSQL Flexible Server `ai-pin-server` | Host PostgreSQL 16 `ai_pin_db` on the VM | Done; off-VM backups pending |
 | 3 | Service Bus `q1` (delayed messages + cancel by sequence id) | `jobs` table in `ai_pin_db` written by the app | **Live 2026-09-11** ([scheduler plan](SCHEDULER_DEPLOYMENT_PLAN_OCI.md)) |
 | 4 | Function App `listener` (queue consumer, wakes device) | `app-backend-worker-1` container (same image, `listener/worker.py`) | **Live 2026-09-11** |
-| 5 | IoT Hub `ai-pin-iot-hub` (cloud-to-device MQTT) | Mosquitto (`aipin-mosquitto`, TLS 8883); worker publishes to `aipin/esp32s3/cmd` | Broker live and receiving the worker's commands; **device firmware must switch to it** (blocked on firmware repo) |
+| 5 | IoT Hub `ai-pin-iot-hub` (cloud-to-device MQTT) | Mosquitto (`aipin-mosquitto`, TLS 8883); worker publishes to `aipin/esp32s3/cmd` | **Live 2026-09-19** — firmware MQTT subscriber flashed; a real reminder woke the cellular pin on time end to end ([scheduler plan](SCHEDULER_DEPLOYMENT_PLAN_OCI.md#5-device)) |
 | – | Gemini API | Gemini API | External, unchanged |
 
 ### Dual-stack (IPv4 + IPv6) status — verified 2026-09-18
