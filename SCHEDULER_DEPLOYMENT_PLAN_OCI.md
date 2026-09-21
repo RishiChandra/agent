@@ -145,6 +145,35 @@ clean topic.
 
 **Blocked on:** firmware repo location and its current transport. Nothing in Steps 1–4 depends on it.
 
+### TODO — announce the triggering task on a woken call
+
+**Observed 2026-09-19 field test:** the wake works (the pin rings and calls in on time), but the orchestrator says
+**nothing** about the reminder that triggered it — the woken `/ws/developer/{user_id}` connection just sits silent until
+the user speaks. The task text *does* reach the chip (the worker's wake payload carries `system_message` with the full task
+and `pending_task:true`), but it is dropped on both sides:
+
+- **Firmware drops it.** `net/wake_mqtt.c` `handle_command` parses only `command`/`reason` and passes just the `reason`
+  string on; `main.c` `on_server_wake` ignores even that and fires a plain `NOTIFY_CALL_START` (a call identical to an
+  ACTION-button press). The `system_message`/`pending_task` is never captured or sent into the WSS.
+- **The Kairos orchestrator has no announce path.** `app/developer_ws/endpoint.py` (`_receive_loop`, ~lines 100–119)
+  handles only `interrupt` / `audio` / `turn_complete`; any `{"pending_task":…}` frame is silently ignored, and it never
+  queries the DB for pending work. The "fetch the task and tell the user" logic exists **only** in the legacy
+  `/ws/{user_id}` handler (`app/websocket_handler.py:235-267`), which the chip does not use.
+- **Compounding identity bug:** the task was created under user `2ba330c0` while the chip connects as its compiled
+  identity `4dd16650`, so a "query pending tasks for this user on connect" approach would find nothing. Align the two
+  (Kairos should create tasks under the id the device authenticates as).
+
+Recommended fix (mirror the legacy contract on both ends):
+1. **Server (no reflash):** add a `pending_task`/`pending_messages` branch to `developer_ws/endpoint.py`'s receive loop and
+   a `SpeechPipeline.on_pending_task()` that injects the task into the LLM context so Kairos speaks it first — modeled on
+   the existing `on_service_ping` announce path (`pipeline.py:370`).
+2. **Firmware (needs a reflash):** capture the wake's `system_message` in `net/wake_mqtt.c` and send it as the first WS
+   frame after connect (e.g. `{"pending_task":true,"system_message":…}`), matching the key the server branch expects.
+3. Fix the `4dd16650` vs `2ba330c0` task-owner identity so ownership, the session-active defer check, and the announcement
+   all key off the same user.
+
+Not blocking the migration — the scheduler→chip wake is proven. This is the last UX/correctness gap before reminders feel finished.
+
 ### Coupled to the stable-address step
 
 `MQTT_TLS_HOST` and the certificate Mosquitto presents follow the public hostname. When the IP/hostname changes, update
@@ -180,6 +209,8 @@ firmware's broker hostname changes with it. Do the hostname change before flashi
   The worker service has `healthcheck: disable: true` because the image's HTTP probe does not apply to it.
   Reminders now work for any device subscribed to Mosquitto; the real device is still on IoT Hub (Step 5).
 - [x] Step 5: flashed + on-device field test PASSED 2026-09-19 (real pin woke on time from a live reminder).
+- [ ] **TODO: announce the triggering task on a woken call** (wake works, but the orchestrator says nothing about the
+  reminder — two-sided gap: firmware drops `system_message`, Kairos has no announce path; details in the TODO section above).
 - [ ] Retire Azure queue/listener/IoT Hub, after the before-go-live checklist.
 
 Operational notes: worker logs via `docker logs app-backend-worker-1`; pending work via `SELECT * FROM jobs WHERE done_at IS NULL`;
