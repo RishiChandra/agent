@@ -3,7 +3,7 @@
 The AI-pin backend runs entirely on a single **Oracle Cloud Always Free** VM. This replaced an Azure stack
 (App Service + PostgreSQL Flexible Server + Service Bus + Function App + IoT Hub) in September 2026; Azure has since
 been retired. This file describes the machine, networking, Docker layout, secrets, and release conventions shared by
-every component. Per-component detail lives in the component docs (see [the index](README.md)).
+every component. Per-component detail lives in the component docs listed at the bottom.
 
 ## The VM
 

@@ -7,7 +7,7 @@ needs to fetch it once. Without the voice, Piper logs ``"piper voice unavailable
 TTS disabled"`` at runtime and the assistant's TTS replies are silent.
 
 On Azure App Service, the voice lives on the persistent ``/home/data/`` volume
-(see ``azure-deploy.sh``) and is pointed at via the ``PIPER_MODEL_PATH`` env var —
+is pointed at via the ``PIPER_MODEL_PATH`` env var —
 this script is local-only.
 
 Run from anywhere:

@@ -33,7 +33,7 @@ Bash equivalent: ```. .venv/Scripts/activate``` (Git Bash on Windows) or ```sour
 python scripts/setup_vosk_model.py
 ```
 
-The script idempotently downloads and unpacks ```vosk-model-small-en-us-0.15``` at the repo root — matches the path checked by ```azure-deploy.sh``` preflight, so no env var change is needed locally. Pick a different model with ```--model <name>``` (see [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)). Sanity check: ```vosk-model-small-en-us-0.15/am/final.mdl``` must exist.
+The script idempotently downloads and unpacks ```vosk-model-small-en-us-0.15``` at the repo root, so no env var change is needed locally. Pick a different model with ```--model <name>``` (see [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)). Sanity check: ```vosk-model-small-en-us-0.15/am/final.mdl``` must exist.
 
 ### 3. Piper TTS voice (~60 MB, gitignored)
 
@@ -81,81 +81,19 @@ Default brings up main, the mic client, and the echo relay (each in its own cons
 To run manually instead: ```python app/main.py```, then ```python test/app/developer/test_developer_ws.py```, then (from `app/`) ```python developer_ws/testing/echo_server.py``` (append ```--ping <user_id>``` for the auto-call variant).
 See ```app/developer_ws/DESIGN.md``` and ```BRIDGE_PROTOCOL.md``` for architecture and wire protocol.
 
-## Deploy to Azure App Service
+## Deployment (OCI)
 
-Zip deploy, no Docker. Done by ```azure-deploy.sh```. Target: ```ai-pin``` resource group, ```websocket-ai-pin``` Linux App Service (Python 3.12, B1).
+The backend runs on a self-hosted **Oracle Cloud Always Free** VM (migrated off Azure in September 2026; Azure retired). It
+is deployed as Docker containers behind Caddy, not via App Service. Full, per-component deployment docs live at the repo root:
 
-### Prereqs
+- [OCI_INFRASTRUCTURE.md](OCI_INFRASTRUCTURE.md) — the VM (specs, SSH access), networking, Docker layout, secrets, build/release conventions, and the hardening TODOs. **Start here.**
+- [BACKEND.md](BACKEND.md) — the FastAPI app + Caddy TLS front door; image build; deploy/rollback.
+- [DATABASE.md](DATABASE.md) — host PostgreSQL `ai_pin_db` and how to connect (SSH tunnel).
+- [SCHEDULER.md](SCHEDULER.md) — reminders: jobs table + worker + Mosquitto + the device firmware wake path.
+- [WEBSITE.md](WEBSITE.md) — the Agent Registry site served by the app.
 
-- Azure CLI installed and ```az login``` complete (refresh token expires after 90d — re-login if you get ```AADSTS700082```).
-- Python 3.12 venv active. Script invokes ```$PYTHON_BIN``` to build the zip via ```zipfile``` stdlib.
-- ```.env``` populated. ```azure-deploy.sh``` reads ```.env``` and pushes the values as App Settings.
-- Local Vosk model + Piper voice exist (steps 2–3 above). Preflight checks for ```vosk-model-small-en-us-0.15/am/final.mdl``` and ```piper_voices/en_US-amy-medium.onnx```.
-- **Windows**: run via **Git Bash**, not WSL stub. PowerShell ```bash azure-deploy.sh``` defaults to WSL on Windows — use ```& "C:\Program Files\Git\bin\bash.exe" azure-deploy.sh``` instead, or open Git Bash directly.
-
-### One-time bootstrap: upload heavy assets to ```/home/data/```
-
-Vosk model + Piper voice live on App Service's persistent ```/home``` volume — not in every deploy zip. Upload them **once** so future deploys ship just app code (~MB, not ~100 MB):
-
-```bash
-# Build a bundle of both data dirs
-python -c "
-import zipfile, os
-EXCLUDE = {'__pycache__', '.pytest_cache'}
-def walk(zf, root):
-    for r, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in EXCLUDE]
-        for f in files:
-            if f.endswith('.pyc'): continue
-            p = os.path.join(r, f)
-            zf.write(p, arcname=p.replace(os.sep, '/'))
-with zipfile.ZipFile('data-bundle.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
-    walk(zf, 'vosk-model-small-en-us-0.15')
-    walk(zf, 'piper_voices')
-"
-
-# Upload + extract to /home/data via Kudu (uses ARM bearer auth — no publishing creds)
-TOKEN=$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)
-curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/zip" \
-     --data-binary "@data-bundle.zip" \
-     "https://websocket-ai-pin-fbbrhfawfkb7ecf3.scm.westus2-01.azurewebsites.net/api/zip/data/"
-rm data-bundle.zip
-```
-
-This step only repeats when the Vosk model or Piper voice file changes.
-
-### Deploy
-
-```bash
-# Git Bash (Windows) or any bash (macOS/Linux)
-bash azure-deploy.sh
-```
-
-What it does:
-
-1. Pushes app settings from ```.env``` (```VOSK_MODEL_PATH=/home/data/...```, ```PIPER_MODEL_PATH=/home/data/...```, secrets).
-2. Sets the startup file: ```bash -c "apt-get update -qq && apt-get install -y -qq libopus0 && cd app && python -m uvicorn main:app --host 0.0.0.0 --port 8000 --ws websockets"``` — installs libopus on every cold start.
-3. Builds a slim zip (app code + ```requirements.txt```, no data assets).
-4. Pushes the zip via ```az webapp deploy```. Oryx repacks into ```output.tar.zst``` and extracts at runtime.
-5. Polls deployment status for up to 15 min, then prints URLs.
-
-### URLs
-
-- App:    ```https://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net```
-- WS:     ```wss://websocket-ai-pin-fbbrhfawfkb7ecf3.westus2-01.azurewebsites.net/ws```
-- Health: ```/healthz```
-
-### Viewing logs
-
-```bash
-# Live tail (Ctrl+C to stop)
-az webapp log tail --name websocket-ai-pin --resource-group ai-pin
-
-# Or via Kudu in a browser
-# https://websocket-ai-pin-fbbrhfawfkb7ecf3.scm.westus2-01.azurewebsites.net/newui/fileManager → /home/LogFiles/
-```
-
-If logging stops working: ```az webapp log config --name websocket-ai-pin --resource-group ai-pin --application-logging filesystem --level information --docker-container-logging filesystem```.
+Public app: `https://146-235-229-232.sslip.io` (health at `/healthz`). Live logs on the VM:
+`docker logs app-backend-app-1` / `docker logs app-backend-worker-1`.
 
 ## Git Rules
 Create a new branch: ```git checkout -b <name>```
@@ -175,8 +113,8 @@ Or delete a specific branch: ```git branch -D branch-name```
 In general keep PRs as small as feasible. Minimize commit and branch complexity for everyone's sake.
 
 ## Server Logs
-View here
-<img width="1715" height="855" alt="Screenshot 2026-02-07 at 14 32 28" src="https://github.com/user-attachments/assets/d03fd709-93c7-4aae-9b97-8adeb63688e1" />
+On the VM: `docker logs -f app-backend-app-1` (backend) or `docker logs -f app-backend-worker-1` (reminder worker). See
+[OCI_INFRASTRUCTURE.md](OCI_INFRASTRUCTURE.md).
 
 ## Mobile App (Flutter)
 Prereqs: Flutter SDK installed and a device/simulator available.
@@ -184,47 +122,38 @@ From ```mobile_app```: run ```flutter pub get``` then ```flutter run```.
 List devices with ```flutter devices```. Run ```flutter clean``` if builds get stuck.
 
 ## Database
-We host a postgres sql server in our Azure resource group.
-Use pgAdmin4 (or other sql client of choice) to connect to the db.
-Credentials can be found in internal docs (ask Rishi) or in the env vars of the web app / app service.
+PostgreSQL `ai_pin_db`, hosted on the OCI VM (moved off Azure). Connect with any SQL client over an SSH tunnel — full
+settings, the SSH-tunnel steps, and how to read the password are in [DATABASE.md](DATABASE.md).
 
-## Listener Function app
-Deploy with ```func azure functionapp publish listener --python``` in listener dir
-
-View Listener Logs Here:
-<img width="1672" height="879" alt="Screenshot 2026-02-07 at 15 19 02" src="https://github.com/user-attachments/assets/b93e9b30-8652-46f1-b970-29a239fd7f46" />
-
-Note when publishing:
-- Make sure your func is up to date, and azure core tools
-- Ask cursor to view the deployment logs via Azure CLI 
+## Reminders / scheduler
+The Azure Service Bus queue + Function App `listener` + IoT Hub were replaced by a PostgreSQL `jobs` table, a worker
+container, and the Mosquitto broker on the VM — see [SCHEDULER.md](SCHEDULER.md) for the full flow and the device wake path.
 
 Testing:
-You can quickly create a task with ```python testing/quick_enqueue.py 1```
-You can also test the task reminder feature by running  ```python test/app/test_task_reminder.py```, which will start a websocket connection with an initial message if the user is not in session or defer by 1 minute.
-
-You can see the current Task Queue for the Service Bus on the Azure Portal:
-<img width="2560" height="1271" alt="screencapture-portal-azure-2025-12-07-17_27_29" src="https://github.com/user-attachments/assets/2d820d6c-1b2e-470c-ae72-aa097f54bb2a" />
+- Create a task quickly: `python testing/quick_enqueue.py 1`.
+- Exercise the reminder path: `python test/app/test_task_reminder.py` (opens a WebSocket with an initial message if the user
+  is not in session, or defers by 1 minute).
+- Watch the queue drain: `docker logs -f app-backend-worker-1` on the VM, or query the `jobs` table (`SELECT * FROM jobs`).
 
 
 ## Improvements Needed
 
 Three known latency wins for the deployed voice loop. Baseline (measured ```2026-05-22``` against B1, ```"hello can you hear me"```): ~9 s from stopped-talking to first audio out. Breakdown: 2.0 s silence timer + 3.3 s Vosk STT + 1.7 s Gemini + 1.6 s Piper TTS first chunk + ~200 ms downlink coalesce.
 
-### 1. App Service SKU upgrade: B1 → P1 v3
+### 1. More compute
 
-The biggest single fix. B1 is a burstable shared 1 vCPU, throttled under sustained inference load. P1 v3 is **2 dedicated Dv4-class vCPUs**, no throttling, ~2–3× CPU throughput for ONNX models.
-
-Expected impact: STT 3.3 s → ~1.0–1.4 s, Piper first-chunk 1.6 s → ~500–700 ms. **~2.5 s shaved.**
-
-Change ```SKU="B1"``` → ```SKU="P1V3"``` in [```azure-deploy.sh```](azure-deploy.sh) and redeploy. Cost: ~$12/mo → ~$113/mo (westus2 Linux, per [Azure retail prices API](price_check.py)). Skip S1 in the middle — same single vCPU as B1, only adds features (slots, custom domains), not perf.
+The old Azure baseline above was measured on a throttled App Service B1. On OCI the app runs on the Always-Free A1 VM
+(2 ARM OCPUs / 12 GB, **shared** with the worker and host PostgreSQL); a first OCI measurement was ~3.6 s end-of-speech →
+first reply. If inference CPU becomes the bottleneck, the lever is a larger (paid) OCI shape or moving Vosk/Piper to a
+dedicated VM, rather than an Azure SKU change. See [OCI_INFRASTRUCTURE.md](OCI_INFRASTRUCTURE.md).
 
 ### 2. Lower the end-of-utterance silence timer
 
-```DEVELOPER_WS_END_SILENCE_SEC``` currently defaults to ```2.0```. Set it to ```1.0``` (or even ```0.7```) in App Settings to shave that off every turn.
+```DEVELOPER_WS_END_SILENCE_SEC``` currently defaults to ```2.0```. Set it to ```1.0``` (or even ```0.7```) in the app's env file (`/home/ubuntu/app-backend-config/backend.env` on the VM) to shave that off every turn.
 
 Expected impact: ~1.0 s shaved.
 
-Trade-off: slow speakers or natural mid-thought pauses get cut off. Easy to A/B — set in Azure Portal → Configuration → Application Settings without redeploying.
+Trade-off: slow speakers or natural mid-thought pauses get cut off. Easy to A/B — change the value and restart the app container (`docker compose -p app-backend -f docker-compose.oci.yml up -d`).
 
 ### 3. Streaming Gemini (token / sentence)
 

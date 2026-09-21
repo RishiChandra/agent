@@ -6,7 +6,7 @@ to git — same pattern as ``piper_voices/`` — so a fresh checkout needs to fe
 once. Without the model, STT returns "" and the assistant never hears anything.
 
 On Azure App Service, the model lives on the persistent ``/home/data/`` volume
-(see ``azure-deploy.sh``) and is pointed at via the ``VOSK_MODEL_PATH`` env var —
+is pointed at via the ``VOSK_MODEL_PATH`` env var —
 this script is local-only.
 
 Run from anywhere:
@@ -30,14 +30,12 @@ from pathlib import Path
 # Alphacephei mirrors all Vosk models at this base URL.
 VOSK_BASE = "https://alphacephei.com/vosk/models"
 
-# Default matches the path checked by azure-deploy.sh preflight and the
-# README quickstart.
+# Default local-dev model, unpacked at the repo root (see the README quickstart).
 DEFAULT_MODEL = "vosk-model-small-en-us-0.15"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# After extraction, this file is the canonical "model is real" check — same
-# sentinel used by azure-deploy.sh's preflight.
+# After extraction, this file is the canonical "model is real" check.
 SENTINEL = Path("am") / "final.mdl"
 
 
