@@ -35,6 +35,13 @@
           <input id="url" required placeholder="wss://your-service.trycloudflare.com/relay" />
           <div class="hint">The WebSocket URL the orchestrator dials (your relay service's public URL).</div>
 
+          <label>Modes</label>
+          <div class="row">
+            <label style="font-weight:normal"><input type="checkbox" id="mode_bridge" checked /> Live calls (bridge)</label>
+            <label style="font-weight:normal"><input type="checkbox" id="mode_task" /> Background tasks</label>
+          </div>
+          <div class="hint">Live calls hand the user's mic to your agent. Background tasks let the orchestrator send your agent a job and read out the result (protocol v2).</div>
+
           <label for="keywords">Keywords</label>
           <input id="keywords" placeholder="weather, forecast, temperature" />
           <div class="hint">Comma-separated. Words the orchestrator matches against to pick your agent.</div>
@@ -132,11 +139,12 @@
         ? '<span class="badge self">self-registered</span>'
         : '<span class="badge">web</span>';
       const inactive = a.active ? "" : '<span class="badge inactive">inactive</span>';
+      const taskBadge = (a.modes || []).includes("task") ? '<span class="badge">tasks</span>' : "";
       return `
         <div class="agent">
           <div class="top">
             <span class="name">${esc(a.name)}</span>
-            ${srcBadge}${inactive}
+            ${srcBadge}${taskBadge}${inactive}
           </div>
           ${a.description ? `<div class="desc">${esc(a.description)}</div>` : ""}
           <div class="url">${esc(a.url)}</div>
@@ -160,6 +168,9 @@
       $("user_intents").value = (a.user_intents || []).join("\n");
       $("service_id").value = a.service_id || "";
       $("version").value = a.version || "1";
+      const modes = a.modes || ["bridge"];
+      $("mode_bridge").checked = modes.includes("bridge");
+      $("mode_task").checked = modes.includes("task");
       const editing = !!a.id;
       $("form-title").textContent = editing ? "Edit agent" : "Register an agent";
       $("submit-btn").textContent = editing ? "Save changes" : "Register agent";
@@ -198,7 +209,12 @@
         user_intents: splitLines($("user_intents").value),
         service_id: $("service_id").value.trim() || null,
         version: $("version").value.trim() || "1",
+        modes: [
+          ...($("mode_bridge").checked ? ["bridge"] : []),
+          ...($("mode_task").checked ? ["task"] : []),
+        ],
       };
+      if (!payload.modes.length) { toast("Pick at least one mode", true); return; }
       const id = $("agent-id").value;
       try {
         if (id) {

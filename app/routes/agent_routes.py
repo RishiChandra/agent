@@ -12,17 +12,22 @@ Two audiences share one `agents` table (see `agents_registry.py`):
     registered for that `service_id`.
 
 Both write to the same store, so an agent added on the website and one that
-self-registers are routable the same way by `agents_registry.resolve_bridge_url`.
+self-registers are routable the same way through `agent_router`.
+
+Protocol v2 adds `modes` (["bridge"], ["task"] or both) and `max_concurrency`
+to both write paths, plus `/api/agents/search` (ranked, intent-aware lookup
+backed by the in-memory router) and paging on `/api/agents`.
 """
 
 import logging
 import traceback
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator
 
 import agents_registry
+from agent_router import MODE_BRIDGE, MODE_TASK, get_router
 
 log = logging.getLogger("agents_registry")
 
@@ -42,6 +47,22 @@ class AgentCreateRequest(BaseModel):
     service_id: Optional[str] = None
     version: str = "1"
     extra: Optional[dict] = None  # any additional free-form agent_info keys
+    # Protocol v2: live audio ("bridge"), background tasks ("task"), or both.
+    modes: List[str] = [MODE_BRIDGE]
+    max_concurrency: Optional[int] = Field(default=None, ge=1, le=1000)
+
+    @field_validator("modes")
+    @classmethod
+    def _check_modes(cls, v: List[str]) -> List[str]:
+        return _validate_modes(v)
+
+
+def _validate_modes(v: Optional[List[str]]) -> List[str]:
+    modes = [str(m).strip().lower() for m in (v or []) if str(m).strip()]
+    bad = [m for m in modes if m not in (MODE_BRIDGE, MODE_TASK)]
+    if bad:
+        raise ValueError(f"unknown mode(s) {bad}; allowed: bridge, task")
+    return list(dict.fromkeys(modes)) or [MODE_BRIDGE]
 
 
 class AgentUpdateRequest(BaseModel):
@@ -54,6 +75,13 @@ class AgentUpdateRequest(BaseModel):
     service_id: Optional[str] = None
     version: Optional[str] = None
     active: Optional[bool] = None
+    modes: Optional[List[str]] = None
+    max_concurrency: Optional[int] = Field(default=None, ge=1, le=1000)
+
+    @field_validator("modes")
+    @classmethod
+    def _check_modes(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        return None if v is None else _validate_modes(v)
 
 
 # ===== Self-registration models (BUILD_SERVICE_PROMPT contract) =====
@@ -64,6 +92,12 @@ class RegisterRequest(BaseModel):
     # Optional niceties so a self-registered service shows up well on the site.
     name: Optional[str] = None
     description: Optional[str] = None
+    # Protocol v2 (all optional; omitted fields leave stored values untouched).
+    modes: Optional[List[str]] = None
+    max_concurrency: Optional[int] = None
+    keywords: Optional[List[str]] = None
+    capabilities: Optional[List[str]] = None
+    user_intents: Optional[List[str]] = None
 
 
 class UnregisterRequest(BaseModel):
@@ -74,13 +108,46 @@ class UnregisterRequest(BaseModel):
 # Website CRUD  (/api/agents)
 # ---------------------------------------------------------------------------
 @router.get("/api/agents")
-def api_list_agents(active_only: bool = False):
-    """List registered agents (newest first). `?active_only=true` hides inactive ones."""
+def api_list_agents(
+    active_only: bool = False,
+    limit: Optional[int] = Query(default=None, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    q: Optional[str] = None,
+):
+    """List registered agents, sorted by name.
+
+    `?active_only=true` hides inactive ones. `limit`/`offset` page the list and
+    `q` filters by name/description/service_id substring. Without `limit` the
+    full list is returned (back-compat for the website).
+    """
     try:
-        return {"agents": agents_registry.list_agents(active_only=active_only)}
+        agents = agents_registry.list_agents(
+            active_only=active_only, limit=limit, offset=offset, q=q,
+        )
+        body = {"agents": agents}
+        if limit is not None:
+            body["total"] = agents_registry.count_agents(active_only=active_only) if not q else None
+            body["limit"] = limit
+            body["offset"] = offset
+        return body
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"failed to list agents: {e}")
+
+
+@router.get("/api/agents/search")
+async def api_search_agents(
+    q: str = Query(..., min_length=1, max_length=500),
+    mode: Optional[str] = Query(default=None, pattern="^(bridge|task)$"),
+    k: int = Query(default=5, ge=1, le=25),
+):
+    """Ranked agent lookup (name, STT-garbled name, or intent) via the router.
+
+    Declared before `/api/agents/{agent_id}` so "search" isn't taken as an id.
+    """
+    router_ = get_router()
+    await router_.ensure_fresh_async()
+    return {"query": q, "results": [c.to_public() for c in router_.search(q, mode=mode, k=k)]}
 
 
 @router.get("/api/agents/{agent_id}")
@@ -105,6 +172,8 @@ def api_create_agent(req: AgentCreateRequest):
             version=(req.version or "1").strip(),
             extra=req.extra or {},
             source="web",
+            modes=req.modes,
+            max_concurrency=req.max_concurrency,
         )
     except Exception as e:
         traceback.print_exc()
@@ -155,9 +224,15 @@ def developer_register(req: RegisterRequest):
     public_url = (req.public_url or "").strip()
     if not service_id or not public_url:
         return {"ok": False, "reason": "service_id and public_url are required"}
+    modes = None
+    if req.modes is not None:
+        try:
+            modes = _validate_modes(req.modes)
+        except ValueError as e:
+            return {"ok": False, "reason": str(e)}
     log.info(
-        "register service_id=%s public_url=%s version=%s",
-        service_id, public_url, req.version,
+        "register service_id=%s public_url=%s version=%s modes=%s",
+        service_id, public_url, req.version, modes,
     )
     try:
         agents_registry.upsert_registration(
@@ -166,6 +241,11 @@ def developer_register(req: RegisterRequest):
             version=(req.version or "1"),
             name=(req.name or None),
             description=(req.description or ""),
+            modes=modes,
+            max_concurrency=req.max_concurrency,
+            keywords=req.keywords,
+            capabilities=req.capabilities,
+            user_intents=req.user_intents,
         )
         return {"ok": True, "service_id": service_id}
     except Exception as e:

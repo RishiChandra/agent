@@ -25,6 +25,11 @@ from __future__ import annotations
 
 START_REMOTE_AUDIO_BRIDGE = "start_remote_audio_bridge"
 END_CONVERSATION = "end_conversation"
+DISPATCH_TASK = "dispatch_task"
+FIND_AGENTS = "find_agents"
+CHECK_TASKS = "check_tasks"
+CANCEL_TASK = "cancel_task"
+ANSWER_AGENT = "answer_agent"
 
 START_REMOTE_AUDIO_BRIDGE_TOOL = {
     "type": "function",
@@ -38,7 +43,9 @@ START_REMOTE_AUDIO_BRIDGE_TOOL = {
             "the server', 'call the remote', 'connect to the service/remote/operator', 'dial "
             "the service', 'hand off to the remote/operator', 'talk to the <name> agent', or "
             "anything clearly equivalent in intent. If the user names a specific agent, pass "
-            "its name in the `agent` argument so the call routes to the right one."
+            "its name in the `agent` argument so the call routes to the right one. Use this "
+            "for a live, back-and-forth conversation with an agent; if the user just wants "
+            "something DONE and reported back, use dispatch_task instead."
         ),
         "parameters": {
             "type": "object",
@@ -51,13 +58,132 @@ START_REMOTE_AUDIO_BRIDGE_TOOL = {
                     "type": "string",
                     "description": (
                         "Name (or service id) of the registered agent to connect to, as the "
-                        "user referred to it — e.g. 'weather bot'. Match it to one of the "
-                        "agents listed in the system prompt. Omit if the user did not name a "
-                        "specific agent, in which case the default configured agent is used."
+                        "user referred to it — e.g. 'weather bot'. If it matches an agent "
+                        "listed in the system prompt, pass that registered name; otherwise "
+                        "pass what the user said verbatim — the orchestrator resolves it "
+                        "(including speech-to-text garbles) and asks the user if it's "
+                        "ambiguous. Omit if the user did not name a specific agent, in which "
+                        "case the default configured agent is used."
                     ),
                 },
             },
             "required": ["reason"],
+        },
+    },
+}
+
+DISPATCH_TASK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": DISPATCH_TASK,
+        "description": (
+            "Hand a task to a registered agent to carry out in the background, and report "
+            "back when it's done — e.g. 'have the booking agent reserve a table for two at "
+            "7', 'ask Ledger to file my Uber receipt', 'get the travel agent to find flights "
+            "to Denver Friday'. The user stays talking to you while the agent works; its "
+            "result is announced automatically. Call this ONLY when the request clearly "
+            "needs an agent (an action in an external system or specialised knowledge) AND "
+            "you have what the task needs. If essential details are missing (e.g. no date "
+            "for a booking), ask the user a short follow-up question instead of calling. If "
+            "you can answer directly from general knowledge, just answer. Do not call it for "
+            "a live conversation with an agent — that's start_remote_audio_bridge."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "The task, as one clear imperative sentence the agent can act on, "
+                        "including every detail the user gave (who/what/when/where)."
+                    ),
+                },
+                "agent": {
+                    "type": "string",
+                    "description": (
+                        "Agent name as the user said it, if they named one. Omit to let the "
+                        "orchestrator pick the best capable agent for the intent."
+                    ),
+                },
+                "details": {
+                    "type": "string",
+                    "description": "Optional extra structured context (constraints, preferences).",
+                },
+            },
+            "required": ["intent"],
+        },
+    },
+}
+
+FIND_AGENTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": FIND_AGENTS,
+        "description": (
+            "Look up which registered agents can help with something. Call this when the "
+            "user asks what agents/services exist, whether there's an agent for X, or when "
+            "you're unsure an agent exists for their request before dispatching or bridging. "
+            "The matches are read out to the user."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What the user wants an agent for, or a name they mentioned.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+CHECK_TASKS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": CHECK_TASKS,
+        "description": (
+            "Report the status of tasks previously handed to agents — call when the user asks "
+            "'is it done yet?', 'what's the status of my booking?', 'what are my agents doing?'."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+CANCEL_TASK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": CANCEL_TASK,
+        "description": (
+            "Cancel a task that an agent is still working on — call when the user says "
+            "'cancel that', 'never mind the booking', 'stop the agent'. Defaults to the most "
+            "recent unfinished task."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Specific task id, if known."},
+            },
+        },
+    },
+}
+
+ANSWER_AGENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": ANSWER_AGENT,
+        "description": (
+            "Pass the user's answer back to an agent that asked a question about a running "
+            "task (the assistant said '<agent> needs something from you: ...'). Call this "
+            "when the user's reply is answering that question."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string", "description": "The user's answer, verbatim."},
+                "task_id": {"type": "string", "description": "Specific task id, if known."},
+            },
+            "required": ["answer"],
         },
     },
 }
@@ -120,6 +246,11 @@ GOOGLE_SEARCH_TOOL = {
 
 ALL_TOOLS = [
     START_REMOTE_AUDIO_BRIDGE_TOOL,
+    DISPATCH_TASK_TOOL,
+    FIND_AGENTS_TOOL,
+    CHECK_TASKS_TOOL,
+    CANCEL_TASK_TOOL,
+    ANSWER_AGENT_TOOL,
     END_CONVERSATION_TOOL,
     GOOGLE_SEARCH_TOOL,
 ]

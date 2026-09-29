@@ -3,11 +3,14 @@
 When active, the local STT/LLM/TTS pipeline is bypassed — frames travel from mic to remote
 and back unchanged. Activation is requested by Gemini via the start_remote_audio_bridge tool.
 
-Handshake (before any audio flows):
+Handshake (before any audio flows), protocol v2 (see `agent_protocol.py`):
 
-    main → remote:  {"type":"hello","user_id":"...","version":"1"}
-    remote → main:  {"type":"ack","accept":true,"service_id":"...","version":"1"}
+    main → remote:  {"type":"hello","user_id":"...","version":"2","mode":"bridge","session_id":"..."}
+    remote → main:  {"type":"ack","accept":true,"service_id":"...","version":"1"|"2"}
                   or {"type":"ack","accept":false,"reason":"..."}
+
+v1 remotes ignore the extra hello fields and answer with a v1 ack; that is
+fully supported (bridge mode is unchanged between v1 and v2).
 
 A missing/late/malformed ack is logged distinctly so it's clear whether the remote
 didn't pick up, rejected the call, or spoke protocol garbage.
@@ -25,6 +28,7 @@ from typing import Awaitable, Callable, Optional
 
 import websockets
 
+import agent_protocol as proto
 from audio_codec import UPLINK_SAMPLE_RATE
 
 from .audio_io import AudioIO
@@ -38,8 +42,10 @@ REMOTE_BRIDGE_URL = os.environ.get(
     "DEVELOPER_WS_REMOTE_BRIDGE_URL", "ws://localhost:8001/relay"
 )
 
-BRIDGE_PROTOCOL_VERSION = "1"
+BRIDGE_PROTOCOL_VERSION = proto.PROTOCOL_VERSION
 BRIDGE_ACK_TIMEOUT_S = float(os.environ.get("DEVELOPER_WS_BRIDGE_ACK_TIMEOUT_S", "5.0"))
+# A dead tunnel must fail fast instead of hanging the voice turn on TCP/TLS.
+BRIDGE_CONNECT_TIMEOUT_S = float(os.environ.get("DEVELOPER_WS_BRIDGE_CONNECT_TIMEOUT_S", "5.0"))
 
 # Outcome categories used by the pipeline to choose a TTS message.
 OUTCOME_OK = "ok"
@@ -151,7 +157,9 @@ class RemoteAudioBridge:
 
         log.info("bridge connecting user_id=%s url=%s", self._user_id, url)
         try:
-            self._ws = await websockets.connect(url, max_size=None)
+            self._ws = await websockets.connect(
+                url, max_size=None, open_timeout=BRIDGE_CONNECT_TIMEOUT_S,
+            )
         except Exception as e:
             log.warning(
                 "bridge connect failed user_id=%s url=%s err=%s",
@@ -161,11 +169,7 @@ class RemoteAudioBridge:
                 ok=False, outcome=OUTCOME_CONNECT_FAILED, detail=str(e)
             )
 
-        hello = {
-            "type": "hello",
-            "user_id": self._user_id,
-            "version": BRIDGE_PROTOCOL_VERSION,
-        }
+        hello = proto.hello(self._user_id, mode=proto.MODE_BRIDGE)
         try:
             await self._ws.send(json.dumps(hello))
             log.info("bridge hello sent user_id=%s", self._user_id)
@@ -245,7 +249,7 @@ class RemoteAudioBridge:
 
         service_id = str(ack.get("service_id", ""))
         remote_version = str(ack.get("version", "?"))
-        if remote_version != "?" and remote_version != BRIDGE_PROTOCOL_VERSION:
+        if remote_version != "?" and remote_version not in proto.SUPPORTED_VERSIONS:
             log.warning(
                 "bridge version mismatch user_id=%s ours=%s theirs=%s — proceeding anyway",
                 self._user_id, BRIDGE_PROTOCOL_VERSION, remote_version,

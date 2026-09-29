@@ -70,52 +70,72 @@ from .pipecat_bits import (
 )
 from .pipecat_llm import CustomGeminiLLMService, _DEFAULT_SYSTEM
 from .scratchpad import Scratchpad
-from .tools import ALL_TOOLS, END_CONVERSATION, START_REMOTE_AUDIO_BRIDGE
+from .tools import (
+    ALL_TOOLS,
+    ANSWER_AGENT,
+    CANCEL_TASK,
+    CHECK_TASKS,
+    DISPATCH_TASK,
+    END_CONVERSATION,
+    FIND_AGENTS,
+    START_REMOTE_AUDIO_BRIDGE,
+)
 from .utterance import UtteranceBuffer
 
 import agents_registry
+import task_dispatcher as td
+from agent_router import (
+    DECISION_AMBIGUOUS,
+    DECISION_NONE,
+    DECISION_WRONG_MODE,
+    MODE_BRIDGE,
+    RouteResult,
+    get_router,
+)
 
 log = logging.getLogger("developer_ws")
 
 
+# Agents listed by name in the system prompt; above this only a count is given
+# and Gemini uses find_agents. Keeps the prompt O(1) in registry size.
+PROMPT_AGENT_LIMIT = int(os.environ.get("DEVELOPER_PROMPT_AGENT_LIMIT", "30"))
+
+_ORCHESTRATION_GUIDANCE = (
+    "\n\nYou are also an orchestrator over registered agents. For each request, decide "
+    "one of four things: (1) answer it yourself when general knowledge suffices; "
+    "(2) ask ONE short follow-up question when an agent is needed but essential details "
+    "are missing; (3) dispatch_task when the user wants something done and reported "
+    "back; (4) start_remote_audio_bridge when they want to talk to an agent live. If no "
+    "agent can do it, say so plainly — never pretend a task was done. Use find_agents "
+    "when unsure which agents exist. The orchestrator resolves agent names for you and "
+    "asks the user when a name is ambiguous, so pass names as heard. "
+    "IMPORTANT: the transcript comes from imperfect speech-to-text that garbles names "
+    "not in its vocabulary — e.g. 'Kairos' may arrive as 'cut in', 'cairo's', or 'kai "
+    "ross'. If part of the request sounds like a listed agent name, pass the REGISTERED "
+    "name; otherwise pass what you heard. When an assistant turn says '<agent> needs "
+    "something from you: ...' and the user replies, use answer_agent."
+)
+
+
 def build_developer_system_instruction() -> str:
-    """Base system prompt plus the current list of registered agents.
+    """Base system prompt + orchestration guidance + a *bounded* agent summary.
 
     The base is the env override (`DEVELOPER_GEMINI_SYSTEM_INSTRUCTION`) or the
-    default in `pipecat_llm`. We append the active agents so Gemini knows which
-    names it may pass as the `agent` argument to `start_remote_audio_bridge`.
-    Snapshotted once per session (at pipeline construction); agents registered
-    mid-call are picked up on the next session.
+    default in `pipecat_llm`. With up to `PROMPT_AGENT_LIMIT` agents they are
+    listed by name; beyond that only the count is stated and Gemini is told to
+    use `find_agents` — the prompt no longer grows with the registry (it used
+    to list every agent, which breaks down at 1000+). Reads the router's cached
+    snapshot; the DB is not touched on the session-start path once warm.
     """
     base = os.environ.get("DEVELOPER_GEMINI_SYSTEM_INSTRUCTION", "").strip() or _DEFAULT_SYSTEM
     try:
-        agents = agents_registry.list_agents(active_only=True)
+        summary = get_router().prompt_summary(limit=PROMPT_AGENT_LIMIT)
     except Exception:
         log.exception("could not load agents for system prompt; using base only")
-        agents = []
-    if not agents:
+        summary = ""
+    if not summary:
         return base
-    lines = [
-        "\n\nRegistered agents you can bridge to via start_remote_audio_bridge "
-        "(pass the exact name as the `agent` argument):",
-    ]
-    for a in agents:
-        name = (a.get("name") or "").strip()
-        if not name:
-            continue
-        desc = (a.get("description") or "").strip()
-        lines.append(f"- {name}: {desc}" if desc else f"- {name}")
-    lines.append(
-        "When the user asks to reach one of these by name, pass that name as `agent`. "
-        "If they just say 'call the service' without naming one, omit `agent`. "
-        "IMPORTANT: the transcript comes from imperfect speech-to-text that garbles "
-        "names not in its vocabulary — e.g. 'Kairos' may arrive as 'cut in', 'cairo's', "
-        "or 'kai ross'. If any part of the request sounds like one of the registered "
-        "agent names above, or the described purpose matches one agent's description, "
-        "treat it as that agent and pass the REGISTERED name (never the garbled text) "
-        "as `agent`."
-    )
-    return base + "\n".join(lines)
+    return base + _ORCHESTRATION_GUIDANCE + "\n\n" + summary
 
 
 def _resolve_bridge_url(selector: str = "", user_id: str = "") -> str:
@@ -138,11 +158,24 @@ def _resolve_bridge_url(selector: str = "", user_id: str = "") -> str:
             log.info("bridge target selector=%r unmatched; using default", sel)
     if not url:
         url = REMOTE_BRIDGE_URL
-    if user_id and "{user_id}" in url:
-        url = url.replace("{user_id}", urllib.parse.quote(user_id, safe=""))
-    return url
+    return _with_user_id(url, user_id)
 
 _BRIDGE_ACK = "Connecting you to the remote service now."
+_BRIDGE_ACK_NAMED = "Connecting you to {name} now."
+_BRIDGE_NOT_FOUND = "I couldn't find an agent called {name}."
+_BRIDGE_WRONG_MODE = "{name} doesn't take live calls, but I can send it a task instead."
+_DISAMBIGUATE = "Did you mean {options}?"
+_TASK_ACK = "Okay, I've asked {name} to handle that. I'll let you know when it's done."
+_TASK_NO_AGENT_NAMED = "I couldn't find an agent called {name} that can take tasks."
+_TASK_NO_AGENT = "I don't have an agent that can do that."
+_TASK_WRONG_MODE = "{name} only takes live calls. Want me to connect you to it?"
+_TASK_USER_LIMIT = "You already have several tasks running. Want me to cancel one first?"
+_TASK_BUSY = "The agents are busy right now. Try again in a moment."
+_TASK_NONE_ACTIVE = "You don't have any tasks running."
+_TASK_CANCELLED = "Okay, I cancelled the task with {name}."
+_TASK_ANSWER_ACK = "Got it, I'll pass that to {name}."
+_TASK_NO_QUESTION = "No agent is waiting on an answer right now."
+_FIND_NONE = "I couldn't find any agents for that."
 _BRIDGE_FAIL_GENERIC = "Sorry, I couldn't open the remote connection."
 _BRIDGE_FAIL_NO_PICKUP = "The remote service didn't pick up."
 _BRIDGE_FAIL_REJECTED = "The remote service declined the call."
@@ -196,6 +229,25 @@ def _ding_frames() -> list:
         TTSAudioRawFrame(audio=_DING_PCM, sample_rate=DOWNLINK_SAMPLE_RATE, num_channels=1),
         BotStoppedSpeakingFrame(),
     ]
+
+
+def _or_join(names: list[str]) -> str:
+    names = [n for n in names if n]
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " or " + names[-1]
+
+
+def _disambiguation(route: RouteResult, n: int = 3) -> str:
+    # Dedupe by name: two identically named agents read as one option aloud.
+    names = list(dict.fromkeys(route.names(n + 2)))[:n]
+    return _DISAMBIGUATE.format(options=_or_join(names))
+
+
+def _with_user_id(url: str, user_id: str) -> str:
+    if user_id and "{user_id}" in url:
+        return url.replace("{user_id}", urllib.parse.quote(user_id, safe=""))
+    return url
 
 
 def _fail_message(result: BridgeStartResult) -> str:
@@ -283,6 +335,13 @@ class SpeechPipeline:
         self._runner = PipelineRunner(handle_sigint=False)
         self._runner_task: Optional[asyncio.Task] = None
 
+        # Background task dispatch: results are announced into this session.
+        self._dispatcher = td.get_dispatcher()
+        self._unsubscribe_tasks: Optional[Callable[[], None]] = None
+        # Task announcements that arrive while the user is bridged to another
+        # agent are held and spoken when the bridge ends.
+        self._held_task_announcements: list[str] = []
+
     # ----- public API used by endpoint.py / app/main.py ---------------------
 
     async def start(self) -> None:
@@ -290,6 +349,15 @@ class SpeechPipeline:
         if self._runner_task is not None and not self._runner_task.done():
             return
         self._runner_task = asyncio.create_task(self._runner.run(self._task))
+        if self._unsubscribe_tasks is None:
+            self._unsubscribe_tasks = self._dispatcher.subscribe(
+                self._user_id, self._on_task_update
+            )
+
+    async def announce_undelivered_tasks(self) -> None:
+        """Speak results of tasks that finished while the user had no live session."""
+        for rec in self._dispatcher.drain_undelivered(self._user_id):
+            await self._speak_task_update(rec)
 
     async def play_connect_ding(self) -> None:
         """Play the chime once, signalling the orchestrator session is live.
@@ -341,6 +409,7 @@ class SpeechPipeline:
         """User said stop / sent `{interrupt:true}` / barged in. Tear down bridge, clear playback."""
         if self._bridge.active:
             await self._bridge.close()
+            asyncio.create_task(self._flush_held_task_announcements(delay_s=1.0))
         self._speaking = False
         # Tag the next transcription as post-interruption so the LLM can tell
         # "stop talking" apart from "end the session" (see pipecat_llm.py).
@@ -386,7 +455,9 @@ class SpeechPipeline:
             self._llm.add_assistant_announcement(_SERVICE_PING_ANNOUNCE)
             await self._task.queue_frame(TTSSpeakFrame(_SERVICE_PING_ANNOUNCE))
             # A ping names its service_id; dial that agent's registered URL if we
-            # have one, else the env default.
+            # have one, else the env default. Refresh the routing snapshot off
+            # the event loop so the lookup below never blocks on the DB.
+            await get_router().ensure_fresh_async()
             result = await self._bridge.start(
                 _resolve_bridge_url(service_id, user_id=self._user_id)
             )
@@ -420,6 +491,11 @@ class SpeechPipeline:
 
     async def close(self) -> None:
         """Tear down the bridge + pipeline runner. Always called from finally."""
+        if self._unsubscribe_tasks is not None:
+            # Tasks keep running; results land in the dispatcher's undelivered
+            # queue and are announced on the user's next session.
+            self._unsubscribe_tasks()
+            self._unsubscribe_tasks = None
         try:
             await self._bridge.close()
         except Exception:
@@ -478,6 +554,11 @@ class SpeechPipeline:
         """
         handlers: dict[str, Callable[[FunctionCallParams], Awaitable[None]]] = {
             START_REMOTE_AUDIO_BRIDGE: self._handle_start_remote_audio_bridge,
+            DISPATCH_TASK: self._handle_dispatch_task,
+            FIND_AGENTS: self._handle_find_agents,
+            CHECK_TASKS: self._handle_check_tasks,
+            CANCEL_TASK: self._handle_cancel_task,
+            ANSWER_AGENT: self._handle_answer_agent,
             END_CONVERSATION: self._handle_end_conversation,
         }
 
@@ -503,10 +584,28 @@ class SpeechPipeline:
         for name, handler in handlers.items():
             self._llm.register_function(name, handler, cancel_on_interruption=True)
 
+    async def _say(self, params: Optional[FunctionCallParams], text: str) -> None:
+        """Speak `text` now and record it as an assistant turn."""
+        frame = TTSSpeakFrame(text)
+        if params is not None:
+            await params.llm.push_frame(frame)
+        else:
+            await self._task.queue_frame(frame)
+        self._llm.add_assistant_announcement(text)
+
+    async def _finish_tool(self, params: FunctionCallParams, result: dict) -> None:
+        await params.result_callback(
+            result, properties=FunctionCallResultProperties(run_llm=False)
+        )
+
     async def _handle_start_remote_audio_bridge(self, params: FunctionCallParams) -> None:
         """Handler for the `start_remote_audio_bridge` Gemini tool.
 
         Implements the immediate-ack workaround:
+          0. If the user named an agent, resolve it through the router first
+             (in-memory, ms). Ambiguous → ask "did you mean A or B?"; unknown →
+             say so; task-only agent → say so. None of these dial anything —
+             dialing a guessed agent is worse than asking.
           1. Push `TTSSpeakFrame` with our exact ack — synthesised in parallel
              with the side effect; no LLM roundtrip for the ack text.
           2. Run the side effect (dial the remote bridge).
@@ -515,25 +614,64 @@ class SpeechPipeline:
              not generate a follow-up response after the tool result lands in
              context.
         """
+        agent_selector = str(params.arguments.get("agent") or "").strip()
+        reason = str(params.arguments.get("reason") or "").strip()
+
+        # 0. Resolve a named agent. No name → env default (unchanged behaviour).
+        url = _with_user_id(REMOTE_BRIDGE_URL, self._user_id)
+        agent_id = ""
+        agent_name = ""
+        if agent_selector:
+            router = get_router()
+            await router.ensure_fresh_async()
+            route = router.resolve(agent_selector, intent=reason, mode=MODE_BRIDGE)
+            log.info(
+                "user_id=%s bridge route selector=%r decision=%s top=%s",
+                self._user_id, agent_selector, route.decision,
+                [(c.agent.name, round(c.score, 2)) for c in route.candidates[:3]],
+            )
+            if route.decision == DECISION_AMBIGUOUS:
+                await self._say(params, _disambiguation(route))
+                await self._finish_tool(params, {
+                    "ok": False, "outcome": "ambiguous", "candidates": route.names(3),
+                })
+                return
+            if route.decision == DECISION_WRONG_MODE and route.wrong_mode is not None:
+                await self._say(params, _BRIDGE_WRONG_MODE.format(name=route.wrong_mode.name))
+                await self._finish_tool(params, {"ok": False, "outcome": "wrong_mode"})
+                return
+            if route.decision == DECISION_NONE or route.best is None:
+                await self._say(params, _BRIDGE_NOT_FOUND.format(name=agent_selector))
+                await self._finish_tool(params, {"ok": False, "outcome": "not_found"})
+                return
+            agent_id, agent_name = route.best.id, route.best.name
+            url = _with_user_id(route.best.url, self._user_id)
+            log.info("bridge target resolved selector=%r -> %s (%s)", agent_selector, agent_name, url)
+
         # 1. Deterministic ack starts speaking immediately, then an audible
         #    "ding" marks the moment of connection. Order matters: the ding is
         #    pushed at the same injection point right after the ack, and Piper
         #    processes frames FIFO, so the user hears the spoken ack first and
         #    the ding immediately after (not before).
-        await params.llm.push_frame(TTSSpeakFrame(_BRIDGE_ACK))
-        self._llm.add_assistant_announcement(_BRIDGE_ACK)
+        ack = _BRIDGE_ACK_NAMED.format(name=agent_name) if agent_name else _BRIDGE_ACK
+        await params.llm.push_frame(TTSSpeakFrame(ack))
+        # The system prompt keys bridge state off turns starting "Connecting you to".
+        self._llm.add_assistant_announcement(ack)
         for _f in _ding_frames():
             await params.llm.push_frame(_f)
 
-        # 2. Side effect — dial the agent the user named, or the env default.
-        agent_selector = str(params.arguments.get("agent") or "").strip()
-        result = await self._bridge.start(
-            _resolve_bridge_url(agent_selector, user_id=self._user_id)
-        )
+        # 2. Side effect — dial the resolved agent (or the env default).
+        result = await self._bridge.start(url)
         log.info(
             "user_id=%s bridge start result ok=%s outcome=%s detail=%r",
             self._user_id, result.ok, result.outcome, result.detail,
         )
+        if agent_id:
+            router = get_router()
+            if result.ok:
+                router.report_success(agent_id)
+            elif result.outcome != OUTCOME_REJECTED:
+                router.report_failure(agent_id, result.outcome)
 
         # 3. Failure → speak failure ack + record.
         if not result.ok:
@@ -542,15 +680,133 @@ class SpeechPipeline:
             self._llm.add_assistant_announcement(fail)
 
         # 4. Return to context with run_llm=False so no Gemini follow-up.
-        await params.result_callback(
-            {
-                "ok": result.ok,
-                "outcome": result.outcome,
-                "service_id": result.service_id,
-                "detail": result.detail,
-            },
-            properties=FunctionCallResultProperties(run_llm=False),
+        await self._finish_tool(params, {
+            "ok": result.ok,
+            "outcome": result.outcome,
+            "service_id": result.service_id,
+            "detail": result.detail,
+        })
+
+    # ----- task dispatch ------------------------------------------------------
+
+    async def _handle_dispatch_task(self, params: FunctionCallParams) -> None:
+        """Handler for `dispatch_task`: route + hand the task off, ack immediately.
+
+        The result is spoken later by `_on_task_update` when the agent reports back.
+        """
+        intent = str(params.arguments.get("intent") or "").strip()
+        agent = str(params.arguments.get("agent") or "").strip()
+        details = str(params.arguments.get("details") or "").strip()
+        sub = await self._dispatcher.submit(
+            user_id=self._user_id,
+            intent=intent,
+            agent=agent,
+            input={"details": details} if details else {},
         )
+        log.info(
+            "user_id=%s dispatch_task agent=%r intent=%r ok=%s reason=%s",
+            self._user_id, agent, intent, sub.ok, sub.reason,
+        )
+        if sub.ok and sub.task is not None:
+            text = _TASK_ACK.format(name=sub.task.agent_name)
+        elif sub.reason == td.REASON_AMBIGUOUS and sub.route is not None:
+            text = _disambiguation(sub.route)
+        elif sub.reason == td.REASON_WRONG_MODE and sub.route and sub.route.wrong_mode:
+            text = _TASK_WRONG_MODE.format(name=sub.route.wrong_mode.name)
+        elif sub.reason == td.REASON_USER_LIMIT:
+            text = _TASK_USER_LIMIT
+        elif sub.reason == td.REASON_BUSY:
+            text = _TASK_BUSY
+        elif agent:
+            text = _TASK_NO_AGENT_NAMED.format(name=agent)
+        else:
+            text = _TASK_NO_AGENT
+        await self._say(params, text)
+        out = sub.to_public()
+        out.pop("candidates", None)
+        await self._finish_tool(params, out)
+
+    async def _handle_find_agents(self, params: FunctionCallParams) -> None:
+        """Handler for `find_agents`: speak the top matches (discovery at any scale)."""
+        query = str(params.arguments.get("query") or "").strip()
+        router = get_router()
+        await router.ensure_fresh_async()
+        matches = [c for c in router.search(query, k=5) if c.score >= 0.5][:3] if query else []
+        if not matches:
+            text = _FIND_NONE
+        else:
+            parts = []
+            for c in matches:
+                desc = c.agent.description.split(".")[0].strip()[:120]
+                parts.append(f"{c.agent.name}: {desc}" if desc else c.agent.name)
+            text = "Here's what I found. " + ". ".join(parts) + "."
+        await self._say(params, text)
+        await self._finish_tool(params, {"ok": bool(matches), "agents": [c.to_public() for c in matches]})
+
+    async def _handle_check_tasks(self, params: FunctionCallParams) -> None:
+        recs = self._dispatcher.list_for_user(self._user_id, limit=3)
+        if not recs:
+            text = _TASK_NONE_ACTIVE
+        else:
+            text = " ".join(r.spoken_summary() for r in recs)
+        await self._say(params, text)
+        await self._finish_tool(params, {"tasks": [r.to_public() for r in recs]})
+
+    async def _handle_cancel_task(self, params: FunctionCallParams) -> None:
+        task_id = str(params.arguments.get("task_id") or "").strip()
+        rec = self._dispatcher.get(task_id) if task_id else self._dispatcher.latest_for_user(self._user_id)
+        if rec is None or rec.user_id != self._user_id or rec.terminal:
+            await self._say(params, _TASK_NONE_ACTIVE)
+            await self._finish_tool(params, {"ok": False})
+            return
+        await self._dispatcher.cancel(rec.task_id)
+        await self._say(params, _TASK_CANCELLED.format(name=rec.agent_name))
+        await self._finish_tool(params, {"ok": True, "task_id": rec.task_id})
+
+    async def _handle_answer_agent(self, params: FunctionCallParams) -> None:
+        answer = str(params.arguments.get("answer") or "").strip()
+        task_id = str(params.arguments.get("task_id") or "").strip()
+        rec = (
+            self._dispatcher.get(task_id) if task_id
+            else self._dispatcher.latest_for_user(self._user_id, status=td.INPUT_REQUIRED)
+        )
+        ok = bool(
+            rec is not None and rec.user_id == self._user_id and answer
+            and await self._dispatcher.provide_input(rec.task_id, answer)
+        )
+        text = _TASK_ANSWER_ACK.format(name=rec.agent_name) if ok and rec else _TASK_NO_QUESTION
+        await self._say(params, text)
+        await self._finish_tool(params, {"ok": ok})
+
+    async def _on_task_update(self, rec: "td.TaskRecord") -> None:
+        """Dispatcher listener: speak the moments the user needs to hear about."""
+        if rec.status not in (td.INPUT_REQUIRED, td.SUCCEEDED, td.FAILED, td.TIMED_OUT):
+            return  # accepted/progress are silent; cancel is acked by its handler
+        await self._speak_task_update(rec)
+
+    async def _speak_task_update(self, rec: "td.TaskRecord") -> None:
+        text = rec.spoken_summary()
+        if not self._alive():
+            # Session is going away: keep the result for the next session.
+            self._dispatcher.requeue_undelivered(rec)
+            return
+        if self._bridge.active:
+            self._held_task_announcements.append(text)
+            return
+        # Recorded in the LLM context (unlike bridge `say` frames) so a follow-up
+        # like "great, and book a taxi there too" has the result to work with.
+        self._llm.add_assistant_announcement(text)
+        await self._task.queue_frame(TTSSpeakFrame(text))
+
+    async def _flush_held_task_announcements(self, delay_s: float = 0.0) -> None:
+        if delay_s:
+            await asyncio.sleep(delay_s)
+        held, self._held_task_announcements = self._held_task_announcements, []
+        for text in held:
+            if not self._alive():
+                return
+            self._llm.add_assistant_announcement(text)
+            await self._task.queue_frame(TTSSpeakFrame(text))
 
     async def _handle_end_conversation(self, params: FunctionCallParams) -> None:
         """Handler for the `end_conversation` Gemini tool.
@@ -634,5 +890,6 @@ class SpeechPipeline:
             return
         try:
             await self._task.queue_frame(TTSSpeakFrame(_BRIDGE_DISCONNECT))
+            await self._flush_held_task_announcements()
         except Exception:
             log.exception("user_id=%s on_bridge_remote_close speak failed", self._user_id)

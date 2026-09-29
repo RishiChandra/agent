@@ -10,6 +10,11 @@ backs the assistant.
 
 For wire-protocol details against the bridge see [BRIDGE_PROTOCOL.md](BRIDGE_PROTOCOL.md).
 
+Beyond the voice loop, main is an **orchestrator** over the registered agents
+(see "Orchestrator v2" below): it routes a request to the right agent among
+1000+, and either bridges the user to it live or **dispatches** a background
+task and speaks the result.
+
 ---
 
 ## Component map
@@ -112,9 +117,10 @@ Two flow modes coexist:
   `VoskUtteranceSTTProcessor`.
 - [`tts.py`](tts.py) — Piper TTS helper, preloaded during app startup. Called from
   `PiperTTSProcessor`.
-- [`tools.py`](tools.py) — OpenAI-shaped tool schemas. Currently only
-  `start_remote_audio_bridge`. Forwarded to Gemini via `tools_schema=`; handlers
-  live in `pipeline._register_tools`.
+- [`tools.py`](tools.py) — OpenAI-shaped tool schemas: `start_remote_audio_bridge`,
+  `dispatch_task`, `find_agents`, `check_tasks`, `cancel_task`, `answer_agent`,
+  `end_conversation`, plus Gemini's built-in `google_search`. Forwarded to
+  Gemini via `set_tools_schema`; handlers live in `pipeline._register_tools`.
 
 ### The bridge
 - [`bridge.py`](bridge.py) — outbound WebSocket to a remote service. Owns the
@@ -137,8 +143,10 @@ Two flow modes coexist:
 
 ### Testing
 - [`testing/echo_server.py`](testing/echo_server.py) — reference remote service.
-  Speaks the bridge protocol, optionally pings main on startup
-  (`--ping <user_id>`), can reject for testing the rejection path
+  Speaks the bridge protocol and v2 task mode. It echoes the intent, and asks
+  a question first if the intent contains "confirm". It optionally pings main
+  on startup (`--ping <user_id>`) or self-registers as a task agent
+  (`--register`). It can reject calls to test the rejection path
   (`ECHO_REJECT_ALL=1`).
 - [`testing/run_full_test.py`](testing/run_full_test.py) — orchestrator. Brings
   up main → client → echo in order, each in its own console, with a watchdog
@@ -203,6 +211,48 @@ Two flow modes coexist:
 
 ---
 
+## Orchestrator v2 — routing at scale + task dispatch
+
+```
+ user speech ─► Gemini (tools) ─┬─ start_remote_audio_bridge(agent) ─► agent_router.resolve(mode=bridge)
+                                │                                        └─► RemoteAudioBridge (live audio)
+                                ├─ dispatch_task(intent, agent?) ──────► task_dispatcher.submit
+                                │                                        ├─ agent_router.resolve(mode=task)
+                                │                                        └─ pooled task-mode WS ─► agent
+                                │                                              task.result ─► spoken to user
+                                ├─ find_agents / check_tasks / cancel_task / answer_agent
+                                └─ plain answer / follow-up question (no tool)
+```
+
+- [`../agent_router.py`](../agent_router.py) — in-memory index over the
+  `agents` table. It refreshes on a TTL and on every registry write, and keeps
+  serving the last good snapshot if the DB is down. Matching covers exact
+  name and service_id, prefix, a phonetic key for STT garbles, fuzzy
+  matching, and TF-IDF over descriptions, keywords and intents. It returns a
+  decision of matched, ambiguous, none, or wrong_mode instead of a guess. It
+  also keeps a per-agent circuit breaker, and `prompt_summary()` keeps the
+  system prompt a fixed size however many agents are registered.
+- [`../task_dispatcher.py`](../task_dispatcher.py) — task lifecycle over
+  protocol v2 task mode. It keeps one multiplexed WebSocket per active agent,
+  reaped when idle and capped. It applies global, per-agent and per-user
+  limits and returns a reason instead of raising. It applies connect, accept
+  and overall deadlines. When routing by intent it fails over to the next
+  capable agent, but never after an agent accepted. It announces results into
+  the live session, and keeps them for the user's next session otherwise.
+- [`../agent_protocol.py`](../agent_protocol.py) — frame names and constants
+  shared by bridge, dispatcher and the echo agent.
+- [`../routes/dispatch_routes.py`](../routes/dispatch_routes.py) — HTTP
+  `/api/dispatch*` for non-voice callers, and `/api/router/stats`.
+
+Tool handlers keep the deterministic-ack pattern. Clarifications ("Did you
+mean A or B?"), refusals and acks are spoken by the handler with
+`run_llm=False` and recorded in the LLM context. Task results are recorded
+too, unlike bridge `say` frames, so follow-ups have context. While the user
+is bridged to another agent, task announcements are held and spoken when the
+bridge ends.
+
+---
+
 ## Configuration
 
 Environment variables (read at process start via `python-dotenv` on `<repo>/.env`):
@@ -219,6 +269,16 @@ Environment variables (read at process start via `python-dotenv` on `<repo>/.env
 | `DEVELOPER_WS_REMOTE_BRIDGE_URL` | `ws://localhost:8001/relay` | Where the bridge dials. |
 | `DEVELOPER_WS_BRIDGE_ACK_TIMEOUT_S` | `5.0` | Max wait for remote ack. |
 | `DEVELOPER_GEMINI_SYSTEM_INSTRUCTION` | — | Override Gemini system prompt. |
+| `DEVELOPER_PROMPT_AGENT_LIMIT` | `30` | Agents listed by name in the prompt; above this only the count is given. |
+| `DEVELOPER_WS_BRIDGE_CONNECT_TIMEOUT_S` | `5.0` | Bridge dial timeout. |
+| `AGENT_ROUTER_REFRESH_S` | `30` | Routing snapshot TTL (writes invalidate immediately). |
+| `AGENT_ROUTER_MATCH_FLOOR` | `0.55` | Minimum score to count as a match. |
+| `AGENT_ROUTER_AMBIGUITY_MARGIN` | `0.12` | Runner-up within this of the winner → ask the user. |
+| `AGENT_ROUTER_FAILURE_THRESHOLD` / `_COOLDOWN_S` | `3` / `60` | Circuit breaker. |
+| `DISPATCH_MAX_INFLIGHT` / `_MAX_QUEUED` / `_MAX_ACTIVE_PER_USER` | `256` / `1024` / `8` | Backpressure limits. |
+| `DISPATCH_MAX_CONNECTIONS` / `_IDLE_CLOSE_S` | `200` / `60` | Task-mode connection pool. |
+| `DISPATCH_DEFAULT_DEADLINE_S` / `_ACCEPT_TIMEOUT_S` / `_INPUT_WAIT_S` | `120` / `5` / `120` | Task timeouts. |
+| `DISPATCH_API_TOKEN` | — | If set, `/api/dispatch*` and `/api/router/stats` require `Authorization: Bearer`. |
 
 Echo-server-only knobs:
 
@@ -247,8 +307,13 @@ Echo-server-only knobs:
   `FrameProcessor` in [pipecat_bits.py](pipecat_bits.py) and insert it into the
   `Pipeline([...])` list in `pipeline.py`.
 - **A change to the bridge protocol** → [bridge.py](bridge.py) +
+  [`../agent_protocol.py`](../agent_protocol.py) +
   [testing/echo_server.py](testing/echo_server.py) +
   [BRIDGE_PROTOCOL.md](BRIDGE_PROTOCOL.md).
+- **How an agent name/intent is matched** → [`../agent_router.py`](../agent_router.py)
+  (tests: `test/app/developer/test_agent_router.py`).
+- **Task lifecycle, limits, failover** → [`../task_dispatcher.py`](../task_dispatcher.py)
+  (tests: `test/app/developer/test_task_dispatcher.py`).
 - **A new way for external systems to trigger something on main** → add an HTTP
   route in [`app/main.py`](../main.py) and a method on `SpeechPipeline` it can
   call after a `registry.get(user_id)` lookup.

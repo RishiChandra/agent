@@ -36,6 +36,8 @@ listener).
 | `BRIDGE_PATH` | `"/relay"` | URL path the WebSocket server serves. Leading slash required. |
 | `SERVICE_ID` | `"<short identifier>"` | This service's name, sent to the orchestrator on every register/ping and reported in the WebSocket ack. Free-form string; a UUID suffix per process helps distinguish runs in the orchestrator's logs. |
 | `ORCHESTRATOR_HTTP_BASE` | `"http(s)://<host>:<port>"` | Base URL of the orchestrator. Used by `register_with_orchestrator()` and `request_orchestrator_call()`. Local-dev example: `"http://localhost:8000"`. |
+| `AGENT_NAME` | `"<spoken name>"` | The name users will say to reach this agent. Sent on registration. |
+| `AGENT_DESCRIPTION` | `"<one sentence>"` | What the agent does. The orchestrator routes on it. |
 
 Notice what is **not** in the CONFIG block: there is no `PUBLIC_BRIDGE_URL`
 macro. The dial URL is **discovered at runtime** from the tunnel process, not
@@ -61,6 +63,10 @@ SERVICE_ID = "REPLACE_ME"
 # Base URL of the orchestrator (no trailing slash). Local-dev example:
 # http://localhost:8000
 ORCHESTRATOR_HTTP_BASE = "REPLACE_ME"
+
+# How users will refer to this agent, and what it does (used for routing).
+AGENT_NAME        = "REPLACE_ME"
+AGENT_DESCRIPTION = "REPLACE_ME"
 # === END CONFIG ===
 
 def _check_macros() -> None:
@@ -68,6 +74,8 @@ def _check_macros() -> None:
         name for name, val in {
             "SERVICE_ID":             SERVICE_ID,
             "ORCHESTRATOR_HTTP_BASE": ORCHESTRATOR_HTTP_BASE,
+            "AGENT_NAME":             AGENT_NAME,
+            "AGENT_DESCRIPTION":      AGENT_DESCRIPTION,
         }.items()
         if not val or val == "REPLACE_ME"
     ]
@@ -152,8 +160,24 @@ accepting any WebSocket connection, the service registers itself.
 
 Request body:
 ```json
-{ "service_id": "<your service id>", "public_url": "wss://<host>/<path>", "version": "1" }
+{
+  "service_id": "<your service id>",
+  "public_url": "wss://<host>/<path>",
+  "version": "2",
+  "name": "<spoken name users will say, e.g. Weather Bot>",
+  "description": "<one sentence: what this agent does>",
+  "modes": ["bridge"],
+  "keywords": ["<routing hint>", "..."],
+  "user_intents": ["<example request a user might say>", "..."]
+}
 ```
+
+`name`, `description`, `keywords` and `user_intents` are how the orchestrator
+finds your agent among 1000+ others, both by spoken name, which is often
+garbled by speech-to-text, and by what the user asks for. Fill them in. `modes` is
+`["bridge"]` for a live-audio relay (this document). Add `"task"` only if you
+also implement task mode from `BRIDGE_PROTOCOL.md`; `max_concurrency` then caps
+parallel tasks. Fields you omit on a re-register keep their stored values.
 
 Response body:
 ```json
@@ -194,7 +218,10 @@ import httpx
 async def register_with_orchestrator(public_url: str) -> dict:
     """Tell the orchestrator how to reach us. MUST succeed before we bind."""
     url = f"{ORCHESTRATOR_HTTP_BASE.rstrip('/')}/developer/register"
-    payload = {"service_id": SERVICE_ID, "public_url": public_url, "version": "1"}
+    payload = {
+        "service_id": SERVICE_ID, "public_url": public_url, "version": "2",
+        "name": AGENT_NAME, "description": AGENT_DESCRIPTION, "modes": ["bridge"],
+    }
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.post(url, json=payload)
         r.raise_for_status()
@@ -266,8 +293,11 @@ The first text frame after the WebSocket upgrade. Read it and verify
 orchestrator times out and tears the socket down.
 
 ```json
-{ "type": "hello", "user_id": "<uuid string identifying the end user>", "version": "1" }
+{ "type": "hello", "user_id": "<uuid string identifying the end user>", "version": "2", "mode": "bridge", "session_id": "<id>" }
 ```
+
+A missing `mode` means `"bridge"`. If `mode` is one you don't support, reject
+(see below) and close with code **4405**.
 
 If the first frame is malformed, missing, or has a `type` other than `"hello"`,
 close the WebSocket with code **1002**.
@@ -276,7 +306,7 @@ close the WebSocket with code **1002**.
 
 Accept:
 ```json
-{ "type": "ack", "accept": true, "service_id": "<your service identifier>", "version": "1" }
+{ "type": "ack", "accept": true, "service_id": "<your service identifier>", "version": "2", "modes": ["bridge"] }
 ```
 
 Reject:
@@ -345,6 +375,7 @@ or text) should be sent.
 | `1000` | Normal closure (after a clean `bye` exchange) |
 | `1002` | Protocol error (missing/malformed hello or ack, etc.) |
 | `4403` | Call rejected (ack with `accept: false`) |
+| `4405` | Requested mode not supported |
 
 ---
 
@@ -371,7 +402,7 @@ import httpx
 # the end user you want to reach.
 async def request_orchestrator_call(user_id: str) -> dict:
     url = f"{ORCHESTRATOR_HTTP_BASE.rstrip('/')}/developer/ping/{user_id}"
-    payload = {"service_id": SERVICE_ID, "version": "1"}
+    payload = {"service_id": SERVICE_ID, "version": "2"}
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.post(url, json=payload)
         return r.json()
@@ -458,7 +489,8 @@ A single Python file `service.py` (or a small self-contained package) that:
   manual URL handoff.
 - Starts with a clearly-fenced `CONFIG` block at the top defining
   `BRIDGE_LISTEN_HOST`, `BRIDGE_LISTEN_PORT`, `BRIDGE_PATH`, `SERVICE_ID`,
-  `ORCHESTRATOR_HTTP_BASE` (plus any business-logic macros it needs), each
+  `ORCHESTRATOR_HTTP_BASE`, `AGENT_NAME`, `AGENT_DESCRIPTION` (plus any
+  business-logic macros it needs), each
   initialised to a placeholder sentinel where appropriate.
 - Refuses to start if any required macro is still at its placeholder — print
   the list of missing macros and exit non-zero.

@@ -358,7 +358,7 @@
     // Load registered agents as a reference for what to say.
     (async () => {
       try {
-        const res = await fetch(API_BASE + "/api/agents?active_only=true");
+        const res = await fetch(API_BASE + "/api/agents?active_only=true&limit=50");
         const { agents } = await res.json();
         if (!agents.length) { $("agents").textContent = "No agents registered yet."; return; }
         $("agents").innerHTML = agents.map((a) =>

@@ -17,6 +17,7 @@ load_dotenv()
 from routes.task_routes import router
 from routes.messaging_routes import router as messaging_router
 from routes.agent_routes import router as agent_router
+from routes.dispatch_routes import router as dispatch_router
 from websocket_handler import websocket_endpoint
 from developer_ws import (
     developer_websocket_endpoint,
@@ -26,6 +27,8 @@ from developer_ws import (
 )
 from developer_ws import registry as developer_registry
 import agents_registry
+import agent_router as agent_router_mod
+import task_dispatcher
 
 # Directory holding the registration website's static files (repo-root
 # agent_directory/, deployable independently of this service). Resolved from
@@ -44,6 +47,14 @@ async def lifespan(app: FastAPI):
         print("[main] agents table ensured")
     except Exception as e:
         print(f"[main] agents table ensure failed: {e}")
+    # Warm the in-memory routing snapshot so the first voice turn / first
+    # session prompt doesn't pay the registry load on the event loop.
+    try:
+        import asyncio as _asyncio
+        n = await _asyncio.to_thread(agent_router_mod.get_router().load_now)
+        print(f"[main] agent router warmed ({n} routable agents)")
+    except Exception as e:
+        print(f"[main] agent router warm failed: {e}")
     # Warm Vosk during startup so the first STT call doesn't pay 5–10s of cold-load.
     try:
         await preload_vosk_model()
@@ -61,6 +72,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[main] silero vad preload failed: {e}")
     yield
+    # Cancel in-flight dispatched tasks (agents get task.cancel) and close the
+    # pooled agent connections.
+    try:
+        await task_dispatcher.get_dispatcher().shutdown()
+    except Exception as e:
+        print(f"[main] dispatcher shutdown failed: {e}")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -94,6 +111,7 @@ async def _no_stale_site(request, call_next):
 app.include_router(router)
 app.include_router(messaging_router)
 app.include_router(agent_router)
+app.include_router(dispatch_router)
 
 # Register WebSocket endpoints
 app.websocket("/ws/{user_id}")(websocket_endpoint)

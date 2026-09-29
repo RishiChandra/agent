@@ -16,6 +16,14 @@ bridge automatically:
 
 Override the port by setting ECHO_SERVER_PORT.
 Override main's URL with MAIN_HTTP_BASE (default http://localhost:8000).
+
+Protocol v2: the same `/relay` endpoint also serves **task mode**. When the
+hello carries `"mode":"task"`, the server acks with `modes: ["bridge","task"]`
+and answers each `task.dispatch` with `task.accepted` → `task.progress` →
+`task.result` whose `say` echoes the intent. If the task's intent contains the
+word "confirm", it first sends `task.input_required` and waits for the
+orchestrator's `task.input` answer — handy for exercising the full round-trip.
+Pass `--register` to self-register as a task-capable agent on startup.
 """
 
 from __future__ import annotations
@@ -38,7 +46,10 @@ log = logging.getLogger("echo_server")
 UPLINK_SR = 16000
 DOWNLINK_SR = 24000
 
-PROTOCOL_VERSION = "1"
+PROTOCOL_VERSION = "2"
+SUPPORTED_MODES = ["bridge", "task"]
+TASK_MAX_CONCURRENCY = int(os.environ.get("ECHO_TASK_MAX_CONCURRENCY", "8"))
+TASK_WORK_S = float(os.environ.get("ECHO_TASK_WORK_S", "0.2"))
 # A per-process identifier so each run is distinguishable in main's logs.
 # Override via --service-id or ECHO_SERVICE_ID.
 SERVICE_ID = os.environ.get("ECHO_SERVICE_ID") or f"echo-server-{uuid.uuid4().hex[:8]}"
@@ -111,14 +122,15 @@ async def relay(websocket: WebSocket) -> None:
 
     user_id = str(hello.get("user_id", "?"))
     client_version = str(hello.get("version", "?"))
-    if client_version != "?" and client_version != PROTOCOL_VERSION:
+    mode = str(hello.get("mode") or "bridge").lower()
+    if client_version != "?" and client_version not in ("1", "2"):
         log.warning(
             "echo: protocol version mismatch peer=%s ours=%s theirs=%s — proceeding anyway",
             peer, PROTOCOL_VERSION, client_version,
         )
     log.info(
-        "echo: hello OK peer=%s user_id=%s client_version=%s",
-        peer, user_id, client_version,
+        "echo: hello OK peer=%s user_id=%s client_version=%s mode=%s",
+        peer, user_id, client_version, mode,
     )
 
     reject, reject_reason = _should_reject()
@@ -139,6 +151,17 @@ async def relay(websocket: WebSocket) -> None:
             pass
         return
 
+    if mode not in SUPPORTED_MODES:
+        log.info("echo: REJECTING unsupported mode=%s peer=%s", mode, peer)
+        try:
+            await websocket.send_text(json.dumps(
+                {"type": "ack", "accept": False, "reason": f"unsupported mode {mode}"}
+            ))
+            await websocket.close(code=4405)
+        except Exception:
+            pass
+        return
+
     try:
         await websocket.send_text(
             json.dumps({
@@ -146,12 +169,18 @@ async def relay(websocket: WebSocket) -> None:
                 "accept": True,
                 "service_id": SERVICE_ID,
                 "version": PROTOCOL_VERSION,
+                "modes": SUPPORTED_MODES,
+                "max_concurrency": TASK_MAX_CONCURRENCY,
             })
         )
     except Exception as e:
         log.warning("echo: ack(accept) send failed peer=%s err=%s", peer, e)
         return
-    log.info("echo: ACK sent (accept) peer=%s user_id=%s", peer, user_id)
+    log.info("echo: ACK sent (accept) peer=%s user_id=%s mode=%s", peer, user_id, mode)
+
+    if mode == "task":
+        await _task_session(websocket, peer)
+        return
 
     resample_state = None
     frames_in = 0
@@ -231,6 +260,116 @@ async def relay(websocket: WebSocket) -> None:
         )
 
 
+async def _task_session(websocket: WebSocket, peer: str) -> None:
+    """Task mode: serve multiplexed task.dispatch frames until bye/disconnect."""
+    send_lock = asyncio.Lock()
+    answers: dict[str, asyncio.Queue] = {}
+    workers: dict[str, asyncio.Task] = {}
+
+    async def send(frame: dict) -> None:
+        async with send_lock:
+            await websocket.send_text(json.dumps(frame))
+
+    async def work(task: dict) -> None:
+        task_id = task["task_id"]
+        intent = str(task.get("intent") or "")
+        try:
+            await send({"type": "task.accepted", "task_id": task_id, "eta_ms": int(TASK_WORK_S * 1000)})
+            if "confirm" in intent.lower():
+                answers[task_id] = asyncio.Queue()
+                await send({
+                    "type": "task.input_required", "task_id": task_id,
+                    "question": f"Should I go ahead with: {intent}?",
+                })
+                answer = await answers[task_id].get()
+                if not str(answer).lower().startswith(("y", "sure", "ok", "go")):
+                    await send({
+                        "type": "task.result", "task_id": task_id, "status": "failed",
+                        "error": "You said not to go ahead.",
+                    })
+                    return
+            await send({"type": "task.progress", "task_id": task_id, "message": "echoing", "pct": 50})
+            await asyncio.sleep(TASK_WORK_S)
+            await send({
+                "type": "task.result", "task_id": task_id, "status": "succeeded",
+                "say": f"Echo agent here. Done: {intent}.",
+                "output": {"echo": intent, "input": task.get("input") or {}},
+            })
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.warning("echo: task worker error task_id=%s err=%s", task_id, e)
+        finally:
+            answers.pop(task_id, None)
+            workers.pop(task_id, None)
+
+    handled = 0
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "task.dispatch" and msg.get("task_id"):
+                if len(workers) >= TASK_MAX_CONCURRENCY:
+                    await send({
+                        "type": "task.rejected", "task_id": msg["task_id"],
+                        "reason": "at capacity", "retryable": True,
+                    })
+                    continue
+                handled += 1
+                log.info("echo: task.dispatch task_id=%s intent=%r", msg["task_id"], msg.get("intent"))
+                workers[msg["task_id"]] = asyncio.create_task(work(msg))
+            elif mtype == "task.cancel":
+                w = workers.get(str(msg.get("task_id")))
+                if w:
+                    w.cancel()
+            elif mtype == "task.input":
+                q = answers.get(str(msg.get("task_id")))
+                if q:
+                    q.put_nowait(msg.get("answer", ""))
+            elif mtype == "ping":
+                await send({"type": "pong", "ts": msg.get("ts")})
+            elif mtype == "bye":
+                try:
+                    await send({"type": "bye", "reason": "ack"})
+                    await websocket.close(code=CLOSE_NORMAL)
+                except Exception:
+                    pass
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        for w in list(workers.values()):
+            w.cancel()
+        log.info("echo: task session ended peer=%s tasks_handled=%d", peer, handled)
+
+
+async def _register_main(base: str, public_url: str, service_id: str) -> None:
+    """Self-register as a bridge + task agent (protocol v2 registration)."""
+    url = f"{base.rstrip('/')}/developer/register"
+    payload = {
+        "service_id": service_id,
+        "public_url": public_url,
+        "version": PROTOCOL_VERSION,
+        "name": "Echo",
+        "description": "Test agent: echoes audio in bridge mode and echoes the request in task mode.",
+        "modes": SUPPORTED_MODES,
+        "max_concurrency": TASK_MAX_CONCURRENCY,
+        "keywords": ["echo", "test"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(url, json=payload)
+            log.info("register response status=%d body=%s", r.status_code, r.text)
+    except Exception as e:
+        log.warning("register failed: %s", e)
+
+
 async def _ping_main(user_id: str, base: str, delay_s: float, service_id: str) -> None:
     """POST to main's /developer/ping/{user_id} after a short delay so it has time to start.
 
@@ -254,10 +393,14 @@ async def _ping_main(user_id: str, base: str, delay_s: float, service_id: str) -
 
 @app.on_event("startup")
 async def _maybe_schedule_ping() -> None:
+    base = os.environ.get("MAIN_HTTP_BASE", "http://localhost:8000")
+    if getattr(app.state, "register", False):
+        port = int(os.environ.get("ECHO_SERVER_PORT", "8001"))
+        public = os.environ.get("PUBLIC_BRIDGE_URL") or f"ws://localhost:{port}/relay"
+        asyncio.create_task(_register_main(base, public, SERVICE_ID))
     user_id = app.state.ping_user_id if hasattr(app.state, "ping_user_id") else None
     if not user_id:
         return
-    base = os.environ.get("MAIN_HTTP_BASE", "http://localhost:8000")
     delay = float(os.environ.get("PING_DELAY_S", "1.0"))
     asyncio.create_task(_ping_main(user_id, base, delay, SERVICE_ID))
 
@@ -279,8 +422,14 @@ if __name__ == "__main__":
         default=None,
         help=f"Override the service_id sent in pings + acks. Defaults to {SERVICE_ID}.",
     )
+    parser.add_argument(
+        "--register",
+        action="store_true",
+        help="On startup, self-register with main as a bridge+task agent named 'Echo'.",
+    )
     args = parser.parse_args()
     app.state.ping_user_id = args.ping
+    app.state.register = args.register
     if args.service_id:
         SERVICE_ID = args.service_id
 

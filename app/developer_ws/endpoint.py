@@ -54,6 +54,8 @@ async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> No
     registry.register(user_id, pipeline)
     # Audible "you're connected to the orchestrator" cue as the session opens.
     await pipeline.play_connect_ding()
+    # Results of background tasks that finished while the user was away.
+    await pipeline.announce_undelivered_tasks()
 
     try:
         await _receive_loop(websocket, user_id, audio, utterance, vad, pipeline, bridge)
