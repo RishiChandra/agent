@@ -142,6 +142,10 @@ def create_task(
             "time_to_execute": time_to_execute
         }
         
+        # Unscheduled tasks (no time_to_execute) are never enqueued: a job with no
+        # deliver_at fires immediately and would wake the device for nothing.
+        if enqueue and not time_to_execute_dt:
+            enqueue = False
         # Enqueue to Service Bus if requested
         if enqueue and enqueue_task_safe is not None:
             try:

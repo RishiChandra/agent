@@ -4,7 +4,7 @@ The database already has an `agents` table used as the orchestrator's routing
 registry:
 
     agent_id   uuid   primary key
-    agent_info json   { name, summary, keywords[], capabilities[], user_intents[], ... }
+    agent_info jsonb  { name, summary, keywords[], capabilities[], user_intents[], ... }
     agent_url  text   the WebSocket URL the orchestrator bridges to
 
 This module is the single access layer over that table. It maps the developer-
@@ -51,7 +51,7 @@ def ensure_agents_table() -> None:
     ddl = """
     CREATE TABLE IF NOT EXISTS agents (
         agent_id  uuid PRIMARY KEY,
-        agent_info json,
+        agent_info jsonb,
         agent_url text
     );
     """

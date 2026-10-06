@@ -54,6 +54,22 @@ def reenqueue_task_after_edit(
         else:
             print(f"Job {enqueue_sequence_id} for task {task_id} already delivered or missing; nothing to cancel")
 
+    # An unscheduled task (no time_to_execute) has nothing to deliver. enqueue_task
+    # would insert a job due *now* and wake the device immediately, so stop at the
+    # cancel and clear the stale job pointer instead.
+    if not time_to_execute:
+        execute_update(
+            "UPDATE tasks SET enqueue_sequence_id = NULL WHERE task_id = %s",
+            (task_id,),
+        )
+        return {
+            "success": True,
+            "task_id": task_id,
+            "scheduled_time": None,
+            "message": "Task is unscheduled; no job enqueued",
+            "sequence_id": None,
+        }
+
     # Enqueue new job with updated payload (same format as task_enqueue)
     result = enqueue_task(
         task_id=task_id,
