@@ -1,7 +1,7 @@
 """Pipecat FrameProcessors that wire the existing developer_ws components into
 a Pipecat Pipeline.
 
-Five custom processors:
+Six custom processors:
 
   - `SessionSource`            : passthrough at the head of the pipeline; gives the
                                  endpoint a stable name to queue frames against.
@@ -18,6 +18,10 @@ Five custom processors:
   - `AudioIOSinkProcessor`     : sinks `TTSAudioRawFrame`s into the existing `AudioIO`,
                                  preserving Opus encode + the legacy wire protocol so the
                                  test client keeps working unchanged.
+  - `ThinkingCueProcessor`     : plays a soft repeating "thinking" pulse straight into
+                                 `AudioIO` between `LLMFullResponseStartFrame` and the
+                                 reply's `BotStartedSpeakingFrame`. Timing/state lives in
+                                 the pipecat-free `thinking_cue.ThinkingPulse`.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
     InterruptionFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     StartFrame,
     TTSAudioRawFrame,
     TTSSpeakFrame,
@@ -50,6 +56,7 @@ from audio_codec import DOWNLINK_SAMPLE_RATE, UPLINK_SAMPLE_RATE
 from .audio_io import AudioIO
 from .bridge import RemoteAudioBridge
 from .stt import StreamingTranscriber
+from .thinking_cue import ThinkingPulse
 from .tts import synthesize_speech_pcm24_stream
 
 log = logging.getLogger("developer_ws")
@@ -294,4 +301,85 @@ class AudioIOSinkProcessor(FrameProcessor):
             await self.push_frame(frame, direction)
             return
 
+        await self.push_frame(frame, direction)
+
+
+class ThinkingCueProcessor(FrameProcessor):
+    """Plays a soft repeating "thinking" pulse during the reply gap.
+
+    The gap — user stopped talking, reply not audible yet — is bracketed by
+    frames the pipeline already emits, so no extra callbacks are needed:
+
+      - START on ``LLMFullResponseStartFrame`` — pushed by
+        ``CustomGeminiLLMService`` the instant it begins a Gemini call, i.e. the
+        moment the orchestrator starts working.
+      - STOP on whichever of these arrives first:
+          * ``BotStartedSpeakingFrame`` — the reply's first audio chunk is ready
+            (real text replies: Piper emits this before ``LLMFullResponseEnd``).
+          * ``LLMFullResponseEndFrame`` — the turn produced no audio (empty reply)
+            OR a tool-ack turn, where the handler's ack is synthesized on a
+            separate task so ``LLMFullResponseEnd`` reaches this processor first.
+            Either way the pulse must stop; ``stop()`` is idempotent so the
+            later ``BotStartedSpeakingFrame`` (if any) is a harmless no-op.
+          * ``UserStartedSpeakingFrame`` — the user started talking during the
+            gap; stop pulsing so the ding is never played over their voice.
+          * ``InterruptionFrame`` / ``CancelFrame`` / ``EndFrame`` — teardown.
+
+    Ticks are emitted straight into ``AudioIO`` via ``add_cue_pcm`` rather than
+    as pipeline frames, so they reuse the exact Opus/coalesce downlink path yet
+    are excluded from turn/barge-in accounting (see ``AudioIO.is_bot_speaking``).
+    The cue emits no ``Bot*SpeakingFrame`` of its own, so it can't re-trigger
+    itself. The first tick is delayed so fast replies stay completely silent.
+
+    Must be placed AFTER ``PiperTTSProcessor``: that is the only point that sees
+    both the LLM-response bracket (passed through Piper) and Piper's own
+    ``BotStartedSpeakingFrame``.
+    """
+
+    # Frames that stop the pulse. stop() is idempotent, so listing several is
+    # safe — whichever arrives first wins.
+    _STOP_FRAMES = (
+        BotStartedSpeakingFrame,
+        UserStartedSpeakingFrame,
+        LLMFullResponseEndFrame,
+        InterruptionFrame,
+        CancelFrame,
+        EndFrame,
+    )
+
+    def __init__(
+        self,
+        audio: AudioIO,
+        *,
+        tick_pcm: bytes,
+        delay_s: float,
+        interval_s: float,
+        max_s: float,
+        enabled: bool = True,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        # Timing/state lives in ThinkingPulse (pipecat-free, unit-tested); this
+        # processor only maps pipeline frames onto its start()/stop().
+        self._pulse = ThinkingPulse(
+            audio,
+            tick_pcm=tick_pcm,
+            delay_s=delay_s,
+            interval_s=interval_s,
+            max_s=max_s,
+            enabled=enabled,
+        )
+
+    @classmethod
+    def _dispatch(cls, frame: Frame, pulse) -> None:
+        """Map one frame onto the pulse. Pure (no pipeline I/O) so it can be
+        unit-tested against a fake pulse without standing up a FrameProcessor."""
+        if isinstance(frame, LLMFullResponseStartFrame):
+            pulse.start()
+        elif isinstance(frame, cls._STOP_FRAMES):
+            pulse.stop()
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        self._dispatch(frame, self._pulse)
         await self.push_frame(frame, direction)

@@ -81,14 +81,25 @@ Two flow modes coexist:
   handlers are registered on the LLM service in `_register_tools`; the bridge's
   `on_say_text` callback is wired to `inject_assistant_text` so remote text
   frames go through the same TTS path as assistant replies.
-- [`pipecat_bits.py`](pipecat_bits.py) — the five custom `FrameProcessor`s that
+- [`pipecat_bits.py`](pipecat_bits.py) — the six custom `FrameProcessor`s that
   make up the pipeline: `SessionSource` (passthrough at the head),
   `BridgeGateProcessor` (defensive audio gate in bridge mode),
   `VoskUtteranceSTTProcessor` (utterance-level Vosk STT triggered by
   `UserStoppedSpeakingFrame`), `PiperTTSProcessor` (synthesizes `TextFrame` and
-  `TTSSpeakFrame` via Piper, emits `TTSAudioRawFrame`), and `AudioIOSinkProcessor`
-  (sinks audio into `AudioIO` and translates pipeline lifecycle frames into
-  AudioIO calls).
+  `TTSSpeakFrame` via Piper, emits `TTSAudioRawFrame`), `ThinkingCueProcessor`
+  (soft "thinking" pulse during the reply gap — see below), and
+  `AudioIOSinkProcessor` (sinks audio into `AudioIO` and translates pipeline
+  lifecycle frames into AudioIO calls).
+- [`thinking_cue.py`](thinking_cue.py) — `ThinkingPulse`, the pipecat-free
+  timing/state core of the "thinking" cue. `ThinkingCueProcessor` starts it on
+  `LLMFullResponseStartFrame` (Gemini call begins) and stops it on the first of
+  `BotStartedSpeakingFrame` (reply audio ready), `LLMFullResponseEndFrame`
+  (no-audio fallback), `UserStartedSpeakingFrame` (user talks over the gap), or a
+  teardown frame. Pulses go to `AudioIO.add_cue_pcm`, which plays them WITHOUT
+  marking a bot turn — so `is_bot_speaking()` (the barge-in gate) ignores the
+  cue and a soft ding can't be mistaken for the assistant speaking. The first
+  tick is delayed so fast replies stay silent. Isolated from pipecat so its
+  cadence is unit-tested (`test/app/developer/test_thinking_cue.py`).
 - [`pipecat_llm.py`](pipecat_llm.py) — `CustomGeminiLLMService`, a subclass of
   Pipecat's `LLMService` that owns the Gemini call (uses `agents/gemini_client.py`
   directly). Holds the per-session `LLMContext`, dispatches function calls to
@@ -153,7 +164,9 @@ Two flow modes coexist:
  2.  endpoint.py creates AudioIO, UtteranceBuffer (silence timer), Scratchpad,
      RemoteAudioBridge, SpeechPipeline. SpeechPipeline builds the Pipecat
      Pipeline/Task/Runner and spawns the runner as a background asyncio task.
- 3.  registry.register(user_id, pipeline)
+ 3.  registry.register(user_id, pipeline); pipeline.play_connect_greeting()
+     speaks a short greeting so the user hears "you're connected" aloud
+     (DEVELOPER_WS_CONNECT_GREETING; "" disables).
  4.  Receive loop:
        - incoming {audio} → pipeline.feed_audio(pcm); first energetic batch
          in a new utterance fires UserStartedSpeakingFrame
@@ -219,6 +232,14 @@ Environment variables (read at process start via `python-dotenv` on `<repo>/.env
 | `DEVELOPER_WS_REMOTE_BRIDGE_URL` | `ws://localhost:8001/relay` | Where the bridge dials. |
 | `DEVELOPER_WS_BRIDGE_ACK_TIMEOUT_S` | `5.0` | Max wait for remote ack. |
 | `DEVELOPER_GEMINI_SYSTEM_INSTRUCTION` | — | Override Gemini system prompt. |
+| `DEVELOPER_WS_CONNECT_GREETING` | `You're connected. How can I help?` | Spoken the instant the socket opens. `""` disables the spoken greeting. |
+| `DEVELOPER_WS_THINKING_ENABLED` | `1` | Play the soft "thinking" pulse during the reply gap. `0` disables. |
+| `DEVELOPER_WS_THINKING_DELAY_SEC` | `0.45` | Silence before the first pulse, so fast replies make no sound. |
+| `DEVELOPER_WS_THINKING_INTERVAL_SEC` | `1.5` | Gap between thinking pulses. |
+| `DEVELOPER_WS_THINKING_MAX_SEC` | `20.0` | Safety cap: stop pulsing after this long even if no reply lands. |
+| `DEVELOPER_WS_THINKING_FREQ_HZ` | `660` | Thinking-pulse tone frequency. |
+| `DEVELOPER_WS_THINKING_GAIN` | `0.13` | Thinking-pulse loudness (0–1); lower = subtler. |
+| `DEVELOPER_WS_ECHO_GUARD_SEC` | `0.5` | Self-echo guard hangover: after the bot's last downlink bundle, uplink is dropped (not transcribed) for this long, so the greeting/reply/ding can't echo into the mic and be answered as a phantom turn. Deliberate loud barge-in during real speech still interrupts. `0` = track live playback only. |
 
 Echo-server-only knobs:
 

@@ -68,7 +68,8 @@ class UtteranceBuffer:
         """Track consecutive loud batches while the bot is speaking.
 
         Called by `_handle_audio` in endpoint.py for each uplink batch that
-        arrives while `audio.is_bot_audible()`. Returns True (and resets) once
+        arrives while `audio.is_bot_speaking()` (a real bot turn — the soft
+        "thinking" cue is excluded). Returns True (and resets) once
         `_barge_batches` consecutive batches clear the barge-in RMS threshold —
         the caller then interrupts the bot mid-speech.
         """
