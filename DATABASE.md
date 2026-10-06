@@ -17,12 +17,12 @@ PostgreSQL 16 install on the VM (not a container). Infrastructure basics are in
 
 Migrated from Azure PostgreSQL Flexible Server `ai-pin-server` (PG 16.14, West US 3). The 2026-09-01 dump was accepted as the
 final copy; the app cut over to `ai_pin_db` on 2026-09-11. There is no migration tool: `agents` is auto-created at app
-startup (`ensure_agents_table`), the rest was restored from the dump, and changes since are numbered, idempotent SQL
-files in [`deploy/sql/`](deploy/sql/) (see [Migrations](#migrations)).
+startup (`ensure_agents_table`), `jobs` by the worker (`deploy/sql/001_jobs.sql`), and the rest was restored from the dump
+and altered by hand since. [Schema](#schema) below is the source of truth.
 
 ## Schema
 
-Live `ai_pin_db` as of **2026-10-06**, after migrations 001–003. Row counts are tiny (single digits to 11 per table).
+Live `ai_pin_db` as of **2026-10-06**. Row counts are tiny (single digits to 11 per table).
 Primary keys are **PK** and foreign keys are **FK**. Every FK was checked to have no orphan rows before it was added.
 
 ```
@@ -71,7 +71,7 @@ tasks ([ORCHESTRATOR_V2_DESIGN.md](ORCHESTRATOR_V2_DESIGN.md) §10.5).
 | `enqueue_sequence_id` | bigint | yes | | **FK** → `jobs.id` ON DELETE SET NULL. The pending wake |
 | `is_scheduled` | boolean | (generated) | | `GENERATED ALWAYS AS (time_to_execute IS NOT NULL) STORED` |
 | `kind` | text | no | `'reminder'` | CHECK: `reminder`, `agent_task` |
-| `created_by` | text | yes | | `kairos`, `app`, `orchestrator` or `agent`. NULL for rows created before 002 |
+| `created_by` | text | yes | | `kairos`, `app`, `orchestrator` or `agent`. NULL for rows created before 2026-10-06 |
 | `agent_id` | uuid | yes | | **FK** → `agents` ON DELETE SET NULL. CHECK: required when `kind = 'agent_task'` |
 | `notify` | text | no | `'device'` | CHECK: `device` (wake the pin), `next_session`, `silent` |
 | `question` | text | yes | | Set while `input_required` |
@@ -80,7 +80,7 @@ tasks ([ORCHESTRATOR_V2_DESIGN.md](ORCHESTRATOR_V2_DESIGN.md) §10.5).
 | `delivered_at` | timestamptz | yes | | NULL until the user has heard the result |
 | `delivered_via` | text | yes | | `live`, `device_wake` or `next_session` |
 | `agent_informed_at` | timestamptz | yes | | NULL until the owning agent got `task.closed` |
-| `created_at` | timestamptz | no | `now()` | Rows from before 002 carry the migration time |
+| `created_at` | timestamptz | no | `now()` | Rows from before 2026-10-06 carry that date |
 | `updated_at` | timestamptz | no | `now()` | Kept current by trigger `tasks_touch_updated_at` |
 
 Indexes: `(user_id, status)`; `(user_id, time_to_execute) WHERE time_to_execute IS NOT NULL`; `(user_id) WHERE
@@ -109,7 +109,7 @@ the FK.
 | Column | Type | Null | Default | Notes |
 |---|---|---|---|---|
 | `agent_id` | uuid | no | | **PK** |
-| `agent_info` | **jsonb** (json before 003) | yes | | `{name, summary, service_id, keywords[], capabilities[], user_intents[], active, …}` |
+| `agent_info` | jsonb | yes | | `{name, summary, service_id, keywords[], capabilities[], user_intents[], active, …}` |
 | `agent_url` | text | yes | | Bridge WebSocket URL |
 
 Indexes: `(agent_info->>'service_id')`, `lower(agent_info->>'name')`. Also auto-created by `ensure_agents_table()`
@@ -153,19 +153,9 @@ Which agents each user has.
 | `uid1`, `uid2` | uuid | no | | **FK** → `users` ON DELETE CASCADE. `uid2` indexed |
 | `rel_type` | text | no | | UNIQUE `(uid1, uid2, rel_type)` |
 
-## Migrations
-
-Numbered, idempotent SQL in [`deploy/sql/`](deploy/sql/). Run each once, as postgres, in one transaction, after a
-`pg_dump` into `/home/ubuntu/db-backups/`:
-`sudo -u postgres psql -d ai_pin_db -v ON_ERROR_STOP=1 -1 -f <file>`.
-
-| File | Applied to `ai_pin_db` | What |
-|---|---|---|
-| `001_jobs.sql` | 2026-09 (migration) | `jobs` queue |
-| `002_tasks_master.sql` | 2026-10-06 | `tasks` becomes the master table (new columns, CHECKs, FKs, indexes, `updated_at` trigger). Drops the empty, unused `agent_tasks` |
-| `003_integrity_indexes.sql` | 2026-10-06 | FKs to `users` and `agents`, indexes, `messages` defaults and NOT NULL, `agents.agent_info` json → jsonb |
-
-Backup taken just before 002/003: `/home/ubuntu/db-backups/pre-tasks-master-20261006T045614Z.dump` (+ `.sha256`).
+Schema changes are applied by hand as postgres, in one transaction, after a `pg_dump` into `/home/ubuntu/db-backups/`
+(e.g. `pre-tasks-master-20261006T045614Z.dump`, taken before the 2026-10-06 changes). `jobs` is the exception: the worker
+creates it from `deploy/sql/001_jobs.sql` at startup.
 
 ## How the app reaches it (container → host bridge)
 

@@ -662,12 +662,11 @@ user, deliver results. Two additions follow from M5:
 
 **Decision (done): `tasks` is the master table** for Kairos reminders and
 orchestrator agent tasks, and `agent_tasks` is dropped. This also settles C1:
-Protocol 2 tasks are persisted, in `tasks`. Migration:
-[`deploy/sql/002_tasks_master.sql`](deploy/sql/002_tasks_master.sql)
-(idempotent and additive; applied to `ai_pin_db` 2026-10-06, schema in `DATABASE.md`).
+Protocol 2 tasks are persisted, in `tasks`. Applied to `ai_pin_db` on
+2026-10-06. The full schema is in `DATABASE.md`.
 
 **Not every task is scheduled.** `time_to_execute` was already nullable. The
-migration adds `is_scheduled`, a generated column (`time_to_execute IS NOT
+schema adds `is_scheduled`, a generated column (`time_to_execute IS NOT
 NULL`) that can't disagree with it. Only scheduled tasks get a `jobs` row. A
 task with no time is never enqueued, because a job without `deliver_at` fires
 immediately and would wake the device. `task_crud.create_task` and
@@ -683,7 +682,7 @@ tasks                                          (existing columns first)
                                                completed | failed | cancelled | timed_out
   time_to_execute    timestamptz               NULL = unscheduled
   enqueue_sequence_id bigint                   → jobs.id of the pending wake (no FK)
-  ── added by 002 ──
+  ── added 2026-10-06 ──
   is_scheduled       bool  generated           time_to_execute IS NOT NULL
   kind               text  not null 'reminder' reminder | agent_task
   created_by         text                      kairos | app | orchestrator | agent (NULL for older rows)
