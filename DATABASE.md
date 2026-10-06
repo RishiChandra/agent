@@ -59,7 +59,7 @@ errors instead of creating a session.
 ### `tasks`: the master task table
 
 One table for the user's own reminders (Kairos voice tools, the app's `/tasks` routes) and orchestrator-dispatched agent
-tasks ([ORCHESTRATOR_V2_DESIGN.md](ORCHESTRATOR_V2_DESIGN.md) §10.5).
+tasks ([ORCHESTRATOR_V2_TOOL_CALLS.md](ORCHESTRATOR_V2_TOOL_CALLS.md) §10.5).
 
 | Column | Type | Null | Default | Notes |
 |---|---|---|---|---|
