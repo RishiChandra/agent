@@ -126,6 +126,9 @@ class VoskUtteranceSTTProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, UserStartedSpeakingFrame):
+            if self._stt is not None:
+                # A start without a matching stop: return the pooled recognizer.
+                await self._stt.abandon()
             self._stt = StreamingTranscriber(self._sample_rate)
             self._fed_bytes = 0
             self._capturing = True
@@ -148,9 +151,9 @@ class VoskUtteranceSTTProcessor(FrameProcessor):
                 return
             stt_ms = int((time.monotonic() - t_stt) * 1000)
             log.info(
-                "user_id=%s transcript=%r (pcm=%dB ~%.2fs) finalize_ms=%d",
+                "user_id=%s transcript=%r (pcm=%dB ~%.2fs) finalize_ms=%d warm=%s",
                 self._user_id, text, fed, fed / (2 * self._sample_rate),
-                stt_ms,
+                stt_ms, stt.warm,
             )
             if text and text.strip():
                 await self.push_frame(
@@ -173,6 +176,15 @@ class VoskUtteranceSTTProcessor(FrameProcessor):
             # Don't push raw audio downstream — Vosk has consumed it. Keeps
             # the pipeline clean of frames the LLM/TTS don't care about.
             return
+
+        if isinstance(frame, (EndFrame, CancelFrame)) and self._stt is not None:
+            # Session teardown mid-utterance: return the pooled recognizer.
+            stt, self._stt = self._stt, None
+            self._capturing = False
+            try:
+                await stt.abandon()
+            except Exception:
+                log.exception("vosk abandon failed user_id=%s", self._user_id)
 
         await self.push_frame(frame, direction)
 

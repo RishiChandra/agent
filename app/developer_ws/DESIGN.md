@@ -120,7 +120,15 @@ Two flow modes coexist:
   now; this file is just the timer — kept as the fallback endpointing path
   behind `vad.py` (fires if the VAD never confirms speech in an utterance).
 - [`stt.py`](stt.py) — Vosk STT helper, preloaded during app startup. Called from
-  `VoskUtteranceSTTProcessor`.
+  `VoskUtteranceSTTProcessor`. Recognizers are **pooled** (`RecognizerPool`): a
+  fresh `KaldiRecognizer` on the lgraph model stalls 1.5–3 s on its first
+  utterance, while a reused one decodes at ~0.15–0.19× real time. Each
+  utterance borrows one on its first audio chunk and returns it on
+  `finalize()` (or `abandon()` on a dropped utterance or teardown). The pool is
+  warmed in the background at startup with a Piper-synthesised clip
+  (`warm_recognizer_pool_with_tts`, from `lifespan()`). It lives in process
+  memory, so every restart or deploy rebuilds and re-warms it. The
+  `transcript=…` log line carries `warm=True/False`.
 - [`tts.py`](tts.py) — Piper TTS helper, preloaded during app startup. Called from
   `PiperTTSProcessor`.
 - [`tools.py`](tools.py) — OpenAI-shaped tool schemas. Currently only
@@ -223,6 +231,9 @@ Environment variables (read at process start via `python-dotenv` on `<repo>/.env
 | Var | Default | Effect |
 |---|---|---|
 | `VOSK_MODEL_PATH` | — | Path to the Vosk model directory. Required for STT. |
+| `VOSK_POOL_WARM` | `2` | Recognizers warmed at startup (background, ~6 s of CPU each). `0` disables warm-up. |
+| `VOSK_POOL_MAX_IDLE` | `4` | Max idle recognizers kept per sample rate (~60–65 MB each once warm). |
+| `VOSK_POOL_MAX_UTTERANCES` | `500` | Retire a recognizer after this many utterances, to bound its decoding-cache growth. |
 | `PIPER_MODEL_PATH` | `piper_voices/en_US-amy-medium.onnx` | Path to the Piper voice. |
 | `GEMINI_TEXT_MODEL` | `gemini-3-flash-preview` | Gemini model id for `generateContent`. |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Auth for the Gemini SDK. |

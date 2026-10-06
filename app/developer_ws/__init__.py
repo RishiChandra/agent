@@ -9,7 +9,7 @@ frames with `{"type":"say","text":"..."}` text frames; see BRIDGE_PROTOCOL.md an
 
 from .audio_io import AudioIO
 from .endpoint import developer_websocket_endpoint
-from .stt import preload_vosk_model
+from .stt import preload_vosk_model, warm_recognizer_pool_with_tts
 from .tts import preload_piper_voice
 from .vad import preload_silero_vad
 
@@ -19,4 +19,5 @@ __all__ = [
     "preload_vosk_model",
     "preload_piper_voice",
     "preload_silero_vad",
+    "warm_recognizer_pool_with_tts",
 ]

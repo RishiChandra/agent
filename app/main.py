@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -23,6 +25,7 @@ from developer_ws import (
     preload_piper_voice,
     preload_silero_vad,
     preload_vosk_model,
+    warm_recognizer_pool_with_tts,
 )
 from developer_ws import registry as developer_registry
 import agents_registry
@@ -60,7 +63,20 @@ async def lifespan(app: FastAPI):
         print("[main] silero vad preloaded")
     except Exception as e:
         print(f"[main] silero vad preload failed: {e}")
+    # Warm pooled Vosk recognizers in the background: a fresh recognizer stalls
+    # 1.5-3 s on its first utterance. Startup isn't delayed; a turn that starts
+    # before warm-up finishes just gets a cold recognizer.
+    app.state.stt_warmup = asyncio.create_task(_warm_stt_pool())
     yield
+
+
+async def _warm_stt_pool() -> None:
+    t0 = time.monotonic()
+    try:
+        n = await warm_recognizer_pool_with_tts()
+        print(f"[main] vosk recognizer pool warmed: {n} in {time.monotonic() - t0:.1f}s")
+    except Exception as e:
+        print(f"[main] vosk recognizer pool warm-up failed: {e}")
 
 
 app = FastAPI(lifespan=lifespan)
