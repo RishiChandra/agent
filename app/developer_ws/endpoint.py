@@ -15,10 +15,11 @@ import asyncio
 import base64
 import json
 import logging
+import os
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from audio_codec import UPLINK_SAMPLE_RATE
+from audio_codec import UPLINK_SAMPLE_RATE, rms_int16_le
 
 from . import registry
 from .audio_io import AudioIO
@@ -29,6 +30,21 @@ from .utterance import UtteranceBuffer
 from .vad import SileroVAD, VADEvent, create_silero_vad
 
 log = logging.getLogger("developer_ws")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        raw = os.environ.get(name)
+        return float(raw) if raw is not None and raw.strip() != "" else default
+    except (TypeError, ValueError):
+        return default
+
+
+# Self-echo guard hangover: how long after the bot's last downlink bundle the
+# mic is still treated as "hearing the bot" (so its echo is dropped, not
+# transcribed). Covers client-playback lag + the acoustic tail. 0 disables the
+# hangover (guard then tracks only live playback).
+_ECHO_GUARD_SEC = _env_float("DEVELOPER_WS_ECHO_GUARD_SEC", 0.5)
 
 
 async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> None:
@@ -52,8 +68,9 @@ async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> No
     pipeline = SpeechPipeline(websocket, user_id, utterance, audio, scratchpad, bridge)
     await pipeline.start()
     registry.register(user_id, pipeline)
-    # Audible "you're connected to the orchestrator" cue as the session opens.
-    await pipeline.play_connect_ding()
+    # Spoken "you're connected to the orchestrator" cue as the session opens —
+    # the orchestrator greets the user aloud the moment the WebSocket is live.
+    await pipeline.play_connect_greeting()
 
     try:
         await _receive_loop(websocket, user_id, audio, utterance, vad, pipeline, bridge)
@@ -159,17 +176,25 @@ async def _handle_audio(
             await bridge.send_uplink_pcm(pcm)
         return
 
+    if pcm and audio.output_guard_active(_ECHO_GUARD_SEC):
+        # Self-echo guard: the orchestrator's own audio (greeting, reply, or the
+        # thinking ding) is reaching the client, so the open mic is mostly
+        # hearing the bot. Transcribing that echo makes the bot answer itself in
+        # a loop — so drop it, EXCEPT a deliberate, loud barge-in during actual
+        # speech. (The ding window and any soft bleed are always dropped:
+        # is_bot_speaking() is False for the cue.)
+        if not (audio.is_bot_speaking() and utterance.barge_in_hit(pcm)):
+            audio.note_guard_drop(rms_int16_le(pcm), user_id)
+            return  # self-echo — ignore it (no feed, no VAD, no timer)
+        # Deliberate barge-in: tear down the reply, then fall through so the
+        # barging speech is fed + endpointed (VAD/timer) like any other utterance.
+        log.info("barge-in user_id=%s — interrupting bot mid-speech", user_id)
+        await pipeline.interrupt()
+        await audio.interrupt()  # also clears the echo guard
+    elif pcm:
+        utterance.reset_barge_in()
+
     if pcm:
-        # Barge-in: the user talking over the bot interrupts it. Runs before
-        # feed so the cancel lands ahead of this batch; the pipeline then
-        # treats the continuing speech as a fresh utterance.
-        if audio.is_bot_audible():
-            if utterance.barge_in_hit(pcm):
-                log.info("barge-in user_id=%s — interrupting bot mid-speech", user_id)
-                await pipeline.interrupt()
-                await audio.interrupt()
-        else:
-            utterance.reset_barge_in()
         await pipeline.feed_audio(pcm)
 
     if data.get("turn_complete") is True:
@@ -192,7 +217,6 @@ async def _handle_audio(
                 return
             if event is VADEvent.STARTED:
                 log.info("vad STARTED user_id=%s", user_id)
-        from audio_codec import rms_int16_le
         _rms = rms_int16_le(pcm)
         _has = utterance.has_speech(pcm)
         log.info(

@@ -36,8 +36,10 @@ from audio_codec import (
 
 log = logging.getLogger("developer_ws")
 
-# Queue tuple: (payload_bytes, chunk_seq, t_recv_ms, duration_ms).
-QueueItem = Tuple[bytes, int, int, int]
+# Queue tuple: (payload_bytes, chunk_seq, t_recv_ms, duration_ms, is_cue).
+# is_cue marks the soft "thinking" pulse, which plays through this same downlink
+# but must NOT count as the bot speaking (see add_cue_pcm / is_bot_speaking).
+QueueItem = Tuple[bytes, int, int, int, bool]
 
 
 class AudioIO:
@@ -76,6 +78,16 @@ class AudioIO:
         # long before the user stops hearing the bot; barge-in needs the
         # user-perceived window, not the queue state.
         self._audible_until = 0.0
+        # Wall-clock horizon until which the client is (estimated) still playing
+        # ANY bot output — speech OR the thinking cue. Advanced per emitted
+        # bundle like `_audible_until`, but including cue bundles. The self-echo
+        # guard is derived purely from this (plus a hangover), NOT from the pump
+        # task, so a wedged pump can never leave the guard stuck on / the mic
+        # deaf. Reset to 0 whenever playback is cleared.
+        self._output_until = 0.0
+        # Throttle state for the echo-guard drop log (1/sec).
+        self._guard_drop_count = 0
+        self._guard_drop_log_at = 0.0
 
     def is_alive(self) -> bool:
         try:
@@ -101,7 +113,24 @@ class AudioIO:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._pump())
 
-    def _enqueue(self, pcm: bytes) -> None:
+    def add_cue_pcm(self, pcm: bytes) -> None:
+        """Queue a short UI cue tone (the "thinking" pulse) for downlink.
+
+        Plays through the same Opus/coalesce path as speech (so the client stream
+        stays continuous), but — unlike `add_playback_pcm` — does NOT set
+        `_turn_active` or advance the client-audible horizon. That keeps the cue
+        out of `is_bot_speaking()`, so the barge-in gate never mistakes a soft
+        ding for the assistant speaking, and the pump drains the tick and exits
+        instead of spinning for the whole reply gap.
+        """
+        if not pcm or not self.is_alive():
+            return
+        self._enqueue(pcm, is_cue=True)
+        self._wake.set()
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._pump())
+
+    def _enqueue(self, pcm: bytes, is_cue: bool = False) -> None:
         rms = rms_int16_le(pcm)
         chunk_ms = int((len(pcm) / 2) * 1000 / DOWNLINK_SAMPLE_RATE)
         t_recv_ms = int((time.monotonic() - self._t0) * 1000)
@@ -116,14 +145,15 @@ class AudioIO:
             if not packets:
                 return
             for pkt in packets:
-                self._queue.append((pkt, seq, t_recv_ms, OPUS_FRAME_MS))
+                self._queue.append((pkt, seq, t_recv_ms, OPUS_FRAME_MS, is_cue))
             log.debug(
-                "pcm in seq=%d t_recv=%dms dt=%dms pcm=%dB opus=%dB (~%dms, %d fr) rms=%d%s q=%d",
+                "pcm in seq=%d t_recv=%dms dt=%dms pcm=%dB opus=%dB (~%dms, %d fr) rms=%d%s%s q=%d",
                 seq, t_recv_ms, dt, len(pcm), sum(len(p) for p in packets),
-                chunk_ms, len(packets), rms, " SILENT" if is_silent else "", len(self._queue),
+                chunk_ms, len(packets), rms, " SILENT" if is_silent else "",
+                " CUE" if is_cue else "", len(self._queue),
             )
         else:
-            self._queue.append((pcm, seq, t_recv_ms, chunk_ms))
+            self._queue.append((pcm, seq, t_recv_ms, chunk_ms, is_cue))
             log.debug(
                 "PCM out seq=%d t_recv=%dms dt=%dms %dB (~%dms) rms=%d q=%d",
                 seq, t_recv_ms, dt, len(pcm), chunk_ms, rms, len(self._queue),
@@ -134,7 +164,7 @@ class AudioIO:
         for pkt in self._downlink.flush_residual():
             self._chunk_seq += 1
             t_recv_ms = int((time.monotonic() - self._t0) * 1000)
-            self._queue.append((pkt, self._chunk_seq, t_recv_ms, OPUS_FRAME_MS))
+            self._queue.append((pkt, self._chunk_seq, t_recv_ms, OPUS_FRAME_MS, False))
             log.debug("flushed residual Opus (%dB)", len(pkt))
         self._turn_active = False
         self._wake.set()
@@ -157,6 +187,9 @@ class AudioIO:
         self._queue.clear()
         self._downlink.clear()
         self._audible_until = 0.0
+        # Clear the echo guard too, so a deliberate barge-in interrupt lets the
+        # user's barging speech be captured immediately (no lingering hangover).
+        self._output_until = 0.0
         self._wake.set()
         if self._task and not self._task.done():
             self._task.cancel()
@@ -170,13 +203,53 @@ class AudioIO:
         return bool(self._queue) or (self._task is not None and not self._task.done())
 
     def is_bot_audible(self) -> bool:
-        """True while the user is (estimated) still hearing bot audio.
+        """True while the user is (estimated) still hearing ANY downlink audio.
 
-        Used by the endpoint's barge-in check. Combines server-side state
-        (queue/pump) with the client-side playback horizon accumulated in
-        `_emit_bundle`.
+        Combines server-side state (queue/pump) with the client-side playback
+        horizon accumulated in `_emit_bundle`. Includes the soft "thinking" cue,
+        so it is used for the end-of-call drain (don't cut audio mid-play), NOT
+        for barge-in — see `is_bot_speaking`.
         """
         return self.is_playing() or time.monotonic() < self._audible_until
+
+    def is_bot_speaking(self) -> bool:
+        """True while a REAL bot turn is (estimated) audible to the user.
+
+        Unlike `is_bot_audible`, this excludes the "thinking" cue (queued via
+        `add_cue_pcm`, which never sets `_turn_active` nor advances the audible
+        horizon). The endpoint uses this to decide whether a deliberate loud
+        barge-in should interrupt — only real bot speech can be interrupted, not
+        the soft ding.
+        """
+        return self._turn_active or time.monotonic() < self._audible_until
+
+    def output_guard_active(self, hangover_s: float = 0.0) -> bool:
+        """True while the bot's OWN audio — speech or the thinking cue — is (or
+        is within `hangover_s` of) still playing on the client.
+
+        The endpoint uses this as a self-echo guard: while it is True the open
+        mic is mostly hearing the bot, so uplink is dropped rather than fed to
+        STT (otherwise the orchestrator transcribes its own greeting/reply/ding
+        and answers itself in a loop). Includes the cue (unlike
+        `is_bot_speaking`). Derived PURELY from the time-based playback horizon
+        `_output_until` — never from the pump task / `is_playing()` — so it
+        always decays and a wedged pump can't leave the mic permanently deaf.
+        """
+        return time.monotonic() < self._output_until + hangover_s
+
+    def note_guard_drop(self, rms: int, user_id: str = "") -> None:
+        """Count an echo-guard-dropped uplink frame; log at most once per second
+        so a diagnosis shows frames ARE arriving and are being guarded (vs. no
+        uplink at all, which logs nothing)."""
+        self._guard_drop_count += 1
+        now = time.monotonic()
+        if now - self._guard_drop_log_at >= 1.0:
+            log.info(
+                "echo-guard dropped %d uplink frame(s) user_id=%s rms=%d output_in=%.2fs",
+                self._guard_drop_count, user_id, rms, self._output_until - now,
+            )
+            self._guard_drop_log_at = now
+            self._guard_drop_count = 0
 
     async def _pump(self) -> None:
         emit_idx = 0
@@ -201,6 +274,11 @@ class AudioIO:
         except Exception as e:
             log.exception("playback error: %s", e)
             traceback.print_exc()
+            # Clear turn/queue/guard state so a crashed pump (with items still
+            # queued) can't wedge is_playing()/output_guard_active() True forever
+            # — which would leave the self-echo guard on and the mic permanently
+            # deaf. State is reset inline (we ARE the task; don't cancel self).
+            await self._stop_pump_inline()
 
     async def _collect_bundle(self) -> dict | None:
         """Pull one queue item, then keep pulling until ~COALESCE_TARGET_MS of audio is bundled."""
@@ -209,6 +287,7 @@ class AudioIO:
         gseq_first = first[1]
         t_recv_first = first[2]
         bundled_ms = first[3]
+        cue_only = first[4]
         gseq_last = gseq_first
 
         # Brief wait for late-arriving frames so first emit isn't a 20ms blip.
@@ -231,6 +310,7 @@ class AudioIO:
             packets.append(nxt[0])
             gseq_last = nxt[1]
             bundled_ms += nxt[3]
+            cue_only = cue_only and nxt[4]
 
         return {
             "packets": packets,
@@ -238,6 +318,7 @@ class AudioIO:
             "gseq_last": gseq_last,
             "bundled_ms": bundled_ms,
             "t_recv_first": t_recv_first,
+            "cue_only": cue_only,
         }
 
     def _build_payload(self, bundle: dict) -> Tuple[dict, str]:
@@ -291,10 +372,14 @@ class AudioIO:
             return False
         send_ms = (loop.time() - t_send_start) * 1000
 
-        # Advance the client playback horizon: the client plays this bundle
-        # back in real time starting no earlier than now.
         now = time.monotonic()
-        self._audible_until = max(now, self._audible_until) + bundle["bundled_ms"] / 1000.0
+        # The client plays this bundle back in real time starting no earlier
+        # than now. ALL output (speech + cue) advances the echo-guard horizon;
+        # only real speech advances the barge-in audible horizon (cue-only
+        # bundles must leave is_bot_speaking() False).
+        self._output_until = max(now, self._output_until) + bundle["bundled_ms"] / 1000.0
+        if not bundle.get("cue_only"):
+            self._audible_until = max(now, self._audible_until) + bundle["bundled_ms"] / 1000.0
 
         log.debug(
             "emit#%d seq=%d t_emit=%dms chunk_seq=[%d..%d] n=%d dwell=%dms %s (~%dms) send=%.0fms q=%d",
@@ -311,3 +396,4 @@ class AudioIO:
         self._queue.clear()
         self._downlink.clear()
         self._audible_until = 0.0
+        self._output_until = 0.0

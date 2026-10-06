@@ -66,6 +66,7 @@ from .pipecat_bits import (
     BridgeGateProcessor,
     PiperTTSProcessor,
     SessionSource,
+    ThinkingCueProcessor,
     VoskUtteranceSTTProcessor,
 )
 from .pipecat_llm import CustomGeminiLLMService, _DEFAULT_SYSTEM
@@ -149,14 +150,38 @@ _BRIDGE_FAIL_REJECTED = "The remote service declined the call."
 _BRIDGE_DISCONNECT = "The remote service disconnected. You're back with me now."
 _SERVICE_PING_ANNOUNCE = "Your service wants to speak with you. Connecting you now."
 _END_CONVERSATION_ACK = "Goodbye! Take care."
+# Spoken the instant the socket opens so "connected" is unmistakable — the
+# orchestrator actually says hello instead of only chiming. Override with
+# DEVELOPER_WS_CONNECT_GREETING; set it to "" to disable the spoken greeting.
+_CONNECT_GREETING = "You're connected. How can I help?"
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env var, falling back to `default` on missing/garbage."""
+    try:
+        raw = os.environ.get(name)
+        return float(raw) if raw is not None and raw.strip() != "" else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse a boolean env var (0/false/no/off = False)."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
 def _build_ding_pcm(sample_rate: int = DOWNLINK_SAMPLE_RATE) -> bytes:
     """A short two-tone ascending chime (int16 mono @ DOWNLINK_SAMPLE_RATE).
 
     Played the instant a remote-bridge connect begins so the handoff to the
-    remote agent is unmistakable. Tone durations are exact multiples of 20 ms
-    so the Opus downlink encoder is left with no residual sub-frame.
+    remote agent is unmistakable. The total (0.12s + 0.14s = 260 ms) is NOT an
+    exact multiple of the 40 ms downlink Opus frame, so it leaves a 20 ms
+    residual; that residual is carried out by the trailing BotStoppedSpeakingFrame
+    in `_ding_frames` → `AudioIO.mark_turn_complete` → `flush_residual`. (Contrast
+    `_build_thinking_tick_pcm`, whose 120 ms IS frame-aligned and needs no flush.)
     """
     tones = ((784.0, 0.12), (1047.0, 0.14))  # G5 -> C6, a rising "connecting" cue
     amp = 0.28 * 32767
@@ -180,6 +205,43 @@ def _build_ding_pcm(sample_rate: int = DOWNLINK_SAMPLE_RATE) -> bytes:
 
 # Precomputed once at import; reused for every ding.
 _DING_PCM = _build_ding_pcm()
+
+
+def _build_thinking_tick_pcm(sample_rate: int = DOWNLINK_SAMPLE_RATE) -> bytes:
+    """A single soft, low "thinking" pulse (int16 mono @ DOWNLINK_SAMPLE_RATE).
+
+    Deliberately quieter and lower than the connect/handoff chime so a pulse
+    repeating every ~1.5 s reads as an unobtrusive "still working" cue rather
+    than an alert. One 120 ms tone == exactly 3 × 40 ms downlink Opus frames, so
+    each independent tick self-aligns to the encoder and leaves no residual
+    sub-frame carried into the next tick (the cue plays tick-by-tick with no
+    mark_turn_complete between them). Short in/out fades avoid clicks. Frequency
+    and gain are env-tunable (`DEVELOPER_WS_THINKING_FREQ_HZ`,
+    `DEVELOPER_WS_THINKING_GAIN`) so "not too disruptive" can be dialed in.
+    """
+    freq = _env_float("DEVELOPER_WS_THINKING_FREQ_HZ", 660.0)
+    gain = _env_float("DEVELOPER_WS_THINKING_GAIN", 0.13)
+    amp = max(0.0, min(1.0, gain)) * 32767
+    dur = 0.12  # 120 ms == 3 × 40 ms Opus frames (OPUS_FRAME_MS); zero residual
+    fade = max(1, int(0.008 * sample_rate))  # 8 ms in/out fade
+    n = int(dur * sample_rate)
+    samples = array.array("h")
+    for i in range(n):
+        env = 1.0
+        if i < fade:
+            env = i / fade
+        elif i > n - fade:
+            env = max(0.0, (n - i) / fade)
+        samples.append(
+            int(amp * env * math.sin(2.0 * math.pi * freq * i / sample_rate))
+        )
+    if sys.byteorder == "big":  # downlink PCM is int16 little-endian
+        samples.byteswap()
+    return samples.tobytes()
+
+
+# Precomputed once at import; reused for every thinking pulse.
+_THINKING_TICK_PCM = _build_thinking_tick_pcm()
 
 
 def _ding_frames() -> list:
@@ -237,6 +299,16 @@ class SpeechPipeline:
         self._bridge = bridge
         self._min_rms = float(os.environ.get("DEVELOPER_WS_MIN_INPUT_RMS", "20"))
 
+        # Spoken greeting on connect (empty string disables the spoken cue).
+        self._connect_greeting = os.environ.get(
+            "DEVELOPER_WS_CONNECT_GREETING", _CONNECT_GREETING
+        ).strip()
+        # Soft "thinking" pulse played while the reply is being produced.
+        self._thinking_enabled = _env_flag("DEVELOPER_WS_THINKING_ENABLED", True)
+        self._thinking_delay_s = _env_float("DEVELOPER_WS_THINKING_DELAY_SEC", 0.45)
+        self._thinking_interval_s = _env_float("DEVELOPER_WS_THINKING_INTERVAL_SEC", 1.5)
+        self._thinking_max_s = _env_float("DEVELOPER_WS_THINKING_MAX_SEC", 20.0)
+
         # Track whether we've fired UserStartedSpeakingFrame for the current
         # utterance. Reset on stop so a new energetic batch re-arms the cycle.
         self._speaking = False
@@ -260,14 +332,28 @@ class SpeechPipeline:
         )
         self._register_tools(ALL_TOOLS)
 
-        # Pipeline: SessionSource → BridgeGate → VoskSTT → LLM → TTS → AudioIOSink.
+        # Pipeline: SessionSource → BridgeGate → VoskSTT → LLM → TTS →
+        #           ThinkingCue → AudioIOSink.
         self._source = SessionSource()
+        # ThinkingCueProcessor sits AFTER Piper so it observes both the LLM
+        # response bracket (LLMFullResponse{Start,End}Frame, passed through Piper)
+        # and Piper's own BotStartedSpeakingFrame — the frames that bound "the
+        # orchestrator is thinking". It writes pulses straight to AudioIO, so it
+        # only needs to be downstream of the frames it listens for.
         self._pipeline = Pipeline([
             self._source,
             BridgeGateProcessor(self._bridge),
             VoskUtteranceSTTProcessor(user_id=user_id, sample_rate=UPLINK_SAMPLE_RATE),
             self._llm,
             PiperTTSProcessor(sample_rate=DOWNLINK_SAMPLE_RATE),
+            ThinkingCueProcessor(
+                audio,
+                tick_pcm=_THINKING_TICK_PCM,
+                delay_s=self._thinking_delay_s,
+                interval_s=self._thinking_interval_s,
+                max_s=self._thinking_max_s,
+                enabled=self._thinking_enabled,
+            ),
             AudioIOSinkProcessor(audio),
         ])
         # `allow_interruptions=True` is essential — without it Pipecat ignores
@@ -291,19 +377,24 @@ class SpeechPipeline:
             return
         self._runner_task = asyncio.create_task(self._runner.run(self._task))
 
-    async def play_connect_ding(self) -> None:
-        """Play the chime once, signalling the orchestrator session is live.
+    async def play_connect_greeting(self) -> None:
+        """Speak a short greeting the instant the session opens.
 
-        Called by the endpoint right after the session is wired up so the user
-        hears an audible "you're connected" cue the moment the WebSocket opens.
+        Called by the endpoint right after the session is wired up. The
+        orchestrator actually *says* hello (via the normal Piper/TTS path)
+        instead of only chiming, so "connected" is unmistakable. The greeting is
+        recorded as an assistant turn (`add_assistant_announcement`) so the LLM
+        knows it already greeted and won't greet again on the first real reply.
+        Set `DEVELOPER_WS_CONNECT_GREETING=""` to disable.
         """
-        if not self._alive():
+        greeting = self._connect_greeting
+        if not greeting or not self._alive():
             return
         try:
-            for _f in _ding_frames():
-                await self._task.queue_frame(_f)
+            self._llm.add_assistant_announcement(greeting)
+            await self._task.queue_frame(TTSSpeakFrame(greeting))
         except Exception:
-            log.exception("user_id=%s connect ding failed", self._user_id)
+            log.exception("user_id=%s connect greeting failed", self._user_id)
 
     async def feed_audio(self, pcm: bytes) -> None:
         """Push one audio batch into the pipeline.
