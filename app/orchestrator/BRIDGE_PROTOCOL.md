@@ -1,5 +1,19 @@
 # developer-WS bridge protocol (v2)
 
+> **Purpose of this file.** This is the **wire-protocol specification**: the
+> single source of truth for every message exchanged between the orchestrator
+> and a remote service, covering both live calls (bridge mode) and background
+> tasks (task mode). It defines *what* goes over the wire, not *how* to build
+> or deploy a service.
+>
+> **Companion file.** [`BUILD_SERVICE_PROMPT.md`](BUILD_SERVICE_PROMPT.md) is
+> the **build prompt** you hand a coding agent. It covers the implementation
+> and deployment requirements this spec leaves out: the `CONFIG` block,
+> self-publishing via a cloudflared tunnel, registration with routing fields,
+> unregister, logging, and the deliverable. To have an agent build a service,
+> give it **both** files. Protocol details belong here only; the build prompt
+> refers to this file rather than repeating them.
+
 This document describes the wire protocol between the **main** server's
 orchestrator voice pipeline (`app/orchestrator`) and any **remote service** (an
 agent) it talks to. Reference implementations:
@@ -49,7 +63,9 @@ shipped today is `ws://localhost:8001/relay` for local development.
 ## Registration (v2 additions)
 
 Services already register with `POST <MAIN_BASE>/developer/register` (see
-`BUILD_SERVICE_PROMPT.md`). In v2, **registration is where you declare
+`BUILD_SERVICE_PROMPT.md` "Registering with the orchestrator" for the base
+payload, including the routing fields `name`, `description`, `domains`,
+`intent_aliases`, `user_intents` and `keywords`). In v2, **registration is where you declare
 capabilities**. Main needs them before it can reach you, and they don't depend
 on any particular connection.
 

@@ -1,5 +1,17 @@
 # Build a voice-relay service that integrates with an upstream orchestrator
 
+> **Purpose of this file.** This is the **build prompt**: instructions you
+> hand a coding agent so it produces a working, self-publishing service. It
+> covers implementation and deployment requirements: the `CONFIG` block,
+> cloudflared tunnel, registration (including routing fields), unregister,
+> heartbeat, outbound calls, logging, and the deliverable.
+>
+> **Companion file (REQUIRED reading).** The wire protocol itself (handshake,
+> audio and `say` frames, `bye`, close codes, and all of task mode) is
+> specified **only** in [`BRIDGE_PROTOCOL.md`](BRIDGE_PROTOCOL.md). Read it
+> alongside this file and implement against it. Where the two disagree on a
+> protocol detail, `BRIDGE_PROTOCOL.md` wins.
+
 You are building a standalone WebSocket server that joins a voice-call flow driven
 by an upstream **orchestrator** server. The orchestrator handles the end user's
 microphone and speaker; when a call is bridged, audio (and optionally text)
@@ -265,12 +277,14 @@ Your service MUST:
    described above, before accepting any WebSocket connection.
 4. **Accept inbound WebSocket connections.** The orchestrator initiates; your
    service only accepts. Do not attempt to open WebSocket connections outbound.
-5. Complete the `hello → ack` handshake described below before any audio flows.
-6. Handle audio frames in both directions using the JSON envelopes specified
-   below. Optionally, send downlink **text** frames (`{"type":"say","text":"..."}`)
-   if you want the orchestrator to TTS for you instead of synthesizing yourself.
+5. Complete the `hello → ack` handshake (`BRIDGE_PROTOCOL.md` Phase 1) before
+   any audio flows.
+6. Handle audio frames in both directions using the JSON envelopes in
+   `BRIDGE_PROTOCOL.md` Phase 2. Optionally, send downlink **text** frames
+   (`{"type":"say","text":"..."}`) if you want the orchestrator to TTS for
+   you instead of synthesizing yourself.
 7. Handle the `bye` control frame for graceful closure, and close with the
-   correct WebSocket close codes.
+   correct WebSocket close codes (`BRIDGE_PROTOCOL.md` Phases 3–4).
 8. Log every connection lifecycle event clearly (startup, tunnel ready,
    registration, connect, hello, ack, frame counters (audio sent/received,
    text-say sent if you use it), bye, disconnect with reason, unregister,
@@ -295,95 +309,21 @@ Your service MAY:
 
 ## Wire protocol
 
-All messages are **text** WebSocket frames carrying a JSON body. All audio
-payloads are **PCM int16, little-endian, mono, base64-encoded**.
+The wire protocol is specified in [`BRIDGE_PROTOCOL.md`](BRIDGE_PROTOCOL.md).
+Implement against it; it is not repeated here. For a live-call service, the
+sections you need are:
 
-### 1. Hello (orchestrator → you)
+- **Phase 1: Handshake.** `hello` → `ack` (accept or reject), the ~5 s ack
+  timeout, and version negotiation.
+- **Phase 2: Audio.** Uplink mic audio (16 kHz), and downlink as either
+  `audio` frames (24 kHz) or `say` text frames that the orchestrator speaks.
+- **Phase 3: Goodbye.** The `bye` exchange.
+- **Phase 4: Close codes.** `1000`, `1002`, `4403`, `4405`.
 
-The first text frame after the WebSocket upgrade. Read it and verify
-`type == "hello"`. You have ~5 seconds to respond with an ack before the
-orchestrator times out and tears the socket down.
-
-```json
-{ "type": "hello", "user_id": "<uuid string identifying the end user>", "version": "1" }
-```
-
-If the first frame is malformed, missing, or has a `type` other than `"hello"`,
-close the WebSocket with code **1002**.
-
-### 2. Ack (you → orchestrator)
-
-Accept:
-```json
-{ "type": "ack", "accept": true, "service_id": "<your service identifier>", "version": "1" }
-```
-
-Reject:
-```json
-{ "type": "ack", "accept": false, "reason": "<short human-readable reason>" }
-```
-After sending a reject, close the WebSocket with code **4403**.
-
-### 3. Frames (bidirectional, after a successful accept)
-
-Uplink (orchestrator → you) is always the end user's mic audio:
-```json
-{ "audio": "<base64>", "sr": 16000, "turn_complete": false }
-```
-- `sr` is always 16000 (16 kHz).
-- Frames arrive in roughly 1.5-second batches but you should not depend on a
-  fixed batch size.
-
-Downlink (you → orchestrator) has two accepted shapes. Choose either per
-frame; you may mix them in the same session.
-
-**(a) Audio frame** — you synthesized the speech yourself:
-```json
-{ "audio": "<base64>", "sr": 24000 }
-```
-- `sr` **should be 24000** (24 kHz). The orchestrator does not resample — any
-  other rate plays back at the wrong speed/pitch. If your audio source is a
-  different rate, resample before sending (e.g. with `audioop.ratecv`).
-- Mono int16 LE base64, same encoding as uplink.
-
-**(b) Text frame** — let the orchestrator TTS for you:
-```json
-{ "type": "say", "text": "Hello, your order has shipped." }
-```
-- The orchestrator runs the text through its own TTS service (Piper) and
-  plays the result to the user. Useful for services that produce text but
-  don't ship TTS — notifications, status updates, scripted responses.
-- `text` must be non-empty after trimming; whitespace-only frames are dropped.
-- The user hears it in the orchestrator's standard voice, not yours. If voice
-  consistency or a specific voice matters to your service, send `audio` frames
-  instead.
-- Side-effects: agent-injected text bypasses the orchestrator's LLM
-  conversation history. If the user replies to what your service "said", the
-  upstream LLM won't have that context. Mostly irrelevant for one-shot
-  notification services; matters for conversational services that interleave
-  with the user's other interactions.
-
-Frames that are missing `type`, `audio`, and `text` should be silently
-dropped on either side. This keeps the protocol forward-compatible — new
-fields and frame types can be added later without breaking older peers.
-
-### 4. Bye (bidirectional)
-
-Either side may send a `bye` to signal graceful closure:
-```json
-{ "type": "bye", "reason": "<short string>" }
-```
-The receiver should respond with its own `bye` and close the WebSocket with
-code **1000**. After a `bye` is sent or received, no further frames (audio
-or text) should be sent.
-
-### 5. Close codes
-
-| Code | Meaning |
-|------|---------|
-| `1000` | Normal closure (after a clean `bye` exchange) |
-| `1002` | Protocol error (missing/malformed hello or ack, etc.) |
-| `4403` | Call rejected (ack with `accept: false`) |
+For a **background-task service** (task mode), also implement **"Task mode
+(v2)"**, add the task-mode registration fields from **"Registration (v2
+additions)"**, and work through **"Building a compatible service — minimum
+checklist"**.
 
 ---
 
