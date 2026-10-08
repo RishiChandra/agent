@@ -56,6 +56,17 @@ async def developer_websocket_endpoint(websocket: WebSocket, user_id: str) -> No
     """
     await websocket.accept()
     log.info("connected user_id=%s", user_id)
+    try:
+        # The first public host seen becomes the agent-callback base URL unless
+        # ORCHESTRATOR_PUBLIC_BASE_URL is set (ORCHESTRATOR_V2_TOOL_CALLS.md App. B).
+        from orchestrator.tasks.service import get_service
+
+        headers = websocket.headers
+        get_service().note_public_host(
+            headers.get("x-forwarded-proto") or websocket.url.scheme, headers.get("host") or "",
+        )
+    except Exception:
+        log.exception("could not record public host")
 
     audio = AudioIO(websocket)
     utterance = UtteranceBuffer()

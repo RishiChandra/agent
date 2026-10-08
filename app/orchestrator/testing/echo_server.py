@@ -1,4 +1,4 @@
-"""Standalone WebSocket echo server for testing the developer_ws bridge.
+"""Standalone WebSocket echo server for testing the orchestrator bridge.
 
 Listens on a separate port from main.py and echoes each uplink audio batch back
 as a downlink frame. Uplink PCM is 16 kHz mono int16; local playback wants
@@ -6,13 +6,13 @@ as a downlink frame. Uplink PCM is 16 kHz mono int16; local playback wants
 
 Run from the `app/` directory while main.py is also running:
 
-    python developer_ws/testing/echo_server.py
+    python orchestrator/testing/echo_server.py
 
 Pass --ping <user_id> to have the echo server POST to main on startup, which
 asks Gemini to announce "your service wants to speak with you" and open the
 bridge automatically:
 
-    python developer_ws/testing/echo_server.py --ping 2ba330c0-a999-46f8-ba2c-855880bdcf5b
+    python orchestrator/testing/echo_server.py --ping 2ba330c0-a999-46f8-ba2c-855880bdcf5b
 
 Override the port by setting ECHO_SERVER_PORT.
 Override main's URL with MAIN_HTTP_BASE (default http://localhost:8000).

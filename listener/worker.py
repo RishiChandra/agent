@@ -27,14 +27,17 @@ Imports resolve relative to this file, so the working directory does not matter.
 Config: DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD and the MQTT_* / DEVICE_ID
 variables documented in listener/mqtt_publish.py.
 """
+import hashlib
+import hmac
 import json
 import logging
 import os
 import signal
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import timedelta
-from pathlib import Path
 
 import psycopg2
 from dotenv import load_dotenv
@@ -59,13 +62,11 @@ MAX_ATTEMPTS = 5
 RETRY_DELAY = timedelta(seconds=30)          # after a failed attempt
 ACTIVE_SESSION_DEFER = timedelta(minutes=1)  # session still open -> try again later
 
+# Orchestrator internal API (deadline hook); "app" is the compose service name.
+ORCHESTRATOR_INTERNAL_URL = os.getenv("ORCHESTRATOR_INTERNAL_URL", "http://app:8000").rstrip("/")
+
 # Fallback carried over from function_app.py for payloads that omit user_id.
 DEFAULT_USER_ID = "4dd16650-c57a-44c4-b530-fc1c15d50e45"
-
-# deploy/sql/001_jobs.sql (copied into the image by the Dockerfile); applied at
-# startup so the worker never polls a database without the table, e.g. on the
-# first deploy before deploy.sh's migration step has run.
-JOBS_SQL_PATH = Path(__file__).resolve().parent.parent / "deploy" / "sql" / "001_jobs.sql"
 
 CLAIM_SQL = """
     SELECT id, kind, payload, attempts
@@ -100,6 +101,73 @@ def get_unread_messages_for_chat(chat_id: str):
     return execute_query(query, (chat_id,))
 
 
+def _internal_token() -> str:
+    """Same derivation as app/orchestrator/tasks/routes.py: explicit, else HMAC of DB_PASSWORD."""
+    explicit = os.environ.get("INTERNAL_API_TOKEN", "").strip()
+    if explicit:
+        return explicit
+    secret = os.environ.get("DB_PASSWORD", "")
+    return hmac.new(secret.encode(), b"aipin-internal-api", hashlib.sha256).hexdigest() if secret else ""
+
+
+def handle_deadline_job(job: dict) -> bool:
+    """`agent_task_deadline`: hand the task's context to the orchestrator, on time.
+
+    Never wakes the device and is never deferred for an active session; the
+    orchestrator decides how to tell the user (ORCHESTRATOR_V2_TOOL_CALLS.md §1.6).
+    Connection errors (the app restarting) are URLError, an OSError, which
+    process_batch retries without spending an attempt, so a deadline is handled
+    late rather than lost. HTTP errors (e.g. 503 when no internal token is
+    configured) spend an attempt, so a misconfiguration gives up after 5 tries.
+    """
+    data = job["payload"] or {}
+    task_id = data.get("task_id")
+    if not task_id:
+        log.warning("job %s: deadline job without task_id, dropping", job["id"])
+        return True
+    req = urllib.request.Request(
+        f"{ORCHESTRATOR_INTERNAL_URL}/internal/tasks/{task_id}/deadline",
+        data=json.dumps(data).encode(), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {_internal_token()}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode() or "{}"
+    except urllib.error.HTTPError as e:
+        # Not an OSError for process_batch: re-raise as a plain error so it counts.
+        raise RuntimeError(f"orchestrator returned {e.code}: {e.read()[:200]!r}") from None
+    log.info("job %s: deadline for task %s handled: %s", job["id"], task_id, body)
+    return True
+
+
+def handle_task_result_job(job: dict) -> bool:
+    """`task_result`: wake the pin so the user hears a finished background task.
+
+    Dropped once the result has been delivered (e.g. the user opened a session
+    first), mirroring the "task no longer pending" safety net for reminders.
+    """
+    data = job["payload"] or {}
+    user_id = data.get("user_id") or DEFAULT_USER_ID
+    task_id = data.get("task_id")
+    if task_id:
+        rows = execute_query("SELECT delivered_at FROM tasks WHERE task_id = %s", (task_id,))
+        if not rows or rows[0].get("delivered_at") is not None:
+            log.info("job %s: task %s already delivered or gone, dropping", job["id"], task_id)
+            return True
+    session = get_session(user_id)
+    if session is not None and session["is_active"] is True:
+        log.info("job %s: session ACTIVE for user %s, deferring %s", job["id"], user_id, ACTIVE_SESSION_DEFER)
+        return False
+    send_to_device(DEFAULT_DEVICE_ID, {
+        "command": "start_websocket",
+        "reason": "task_result",
+        "user_id": user_id,
+        "system_message": json.dumps({"task_id": task_id, "reason": "task_result"}),
+    })
+    log.info("job %s: sent start_websocket (task_result) for user %s", job["id"], user_id)
+    return True
+
+
 def handle_job(job: dict) -> bool:
     """
     Port of function_app.QueueWorker for one job row.
@@ -108,6 +176,13 @@ def handle_job(job: dict) -> bool:
     later because the user's websocket session is still active.
     Any exception propagates to process_batch, which counts it as a failed attempt.
     """
+    # Orchestrator job kinds come first: the generic path below wakes the device
+    # for any kind other than text_message.
+    if job["kind"] == "agent_task_deadline":
+        return handle_deadline_job(job)
+    if job["kind"] == "task_result":
+        return handle_task_result_job(job)
+
     job_id = job["id"]
     data = job["payload"]
     body = json.dumps(data)  # forwarded to the device as system_message, as the raw queue body was
@@ -212,17 +287,6 @@ def process_batch(conn) -> int:
     return len(jobs)
 
 
-def ensure_jobs_table(conn) -> None:
-    """Apply deploy/sql/001_jobs.sql (CREATE ... IF NOT EXISTS) when the file is present."""
-    if not JOBS_SQL_PATH.is_file():
-        log.info("%s not found; assuming the jobs table already exists", JOBS_SQL_PATH)
-        return
-    with conn:
-        with conn.cursor() as cur:
-            cur.execute(JOBS_SQL_PATH.read_text())
-    log.info("applied %s", JOBS_SQL_PATH)
-
-
 def main() -> None:
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
@@ -237,7 +301,6 @@ def main() -> None:
         try:
             if conn is None or conn.closed:
                 conn = get_db_connection()
-                ensure_jobs_table(conn)
                 log.info("connected to postgres at %s", os.environ.get("DB_HOST"))
             claimed = process_batch(conn)
             if claimed:

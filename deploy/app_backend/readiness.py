@@ -18,9 +18,9 @@ async def audio_checks():
     import nltk
     nltk.data.find("tokenizers/punkt_tab/english/")
     from vosk import KaldiRecognizer
-    from developer_ws.stt import _load_model_sync
-    from developer_ws.tts import _load_voice, synthesize_speech_pcm24
-    from developer_ws.vad import SileroVAD
+    from orchestrator.stt import _load_model_sync
+    from orchestrator.tts import _load_voice, synthesize_speech_pcm24
+    from orchestrator.vad import SileroVAD
 
     pcm = bytes(320 * 2)
     encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_VOIP)

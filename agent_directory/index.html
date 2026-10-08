@@ -47,6 +47,37 @@
           <textarea id="user_intents" placeholder="What's the weather in Boston?&#10;Will it rain tomorrow?"></textarea>
           <div class="hint">One per line — phrases a user might say to reach your agent.</div>
 
+          <label for="domains">Domains</label>
+          <input id="domains" placeholder="nutrition, food log, calories" />
+          <div class="hint">What your agent is the authority for. Comma-separated.</div>
+
+          <label for="intent_aliases">Trigger phrases</label>
+          <textarea id="intent_aliases" placeholder="calories&#10;log my lunch"></textarea>
+          <div class="hint">One per line. Requests containing one of these route to your agent even if it isn't named.</div>
+
+          <div class="row">
+            <div>
+              <label for="routing_policy">Routing policy</label>
+              <select id="routing_policy">
+                <option value="on_request">Only when the user's data or an action is needed</option>
+                <option value="owns_domain">Every request in its domains</option>
+              </select>
+            </div>
+            <div>
+              <label>Modes</label>
+              <label class="hint"><input type="checkbox" id="mode_bridge" checked /> Live calls</label>
+              <label class="hint"><input type="checkbox" id="mode_task" /> Background tasks</label>
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label class="hint"><input type="checkbox" id="side_effects" checked /> Acts in the world (books, buys, sends): the user hears a read-back first</label>
+            </div>
+            <div>
+              <label class="hint"><input type="checkbox" id="user_data" /> Holds the user's personal data</label>
+            </div>
+          </div>
+
           <div class="row">
             <div>
               <label for="service_id">Service ID</label>
@@ -141,6 +172,7 @@
           ${a.description ? `<div class="desc">${esc(a.description)}</div>` : ""}
           <div class="url">${esc(a.url)}</div>
           ${(a.keywords && a.keywords.length) ? `<div class="hint" style="margin-top:6px">🔑 ${a.keywords.map(esc).join(", ")}</div>` : ""}
+          <div class="hint" style="margin-top:6px">${(a.modes || ["bridge"]).map((m) => m === "task" ? "background tasks" : "live calls").join(" · ")}${a.side_effects === false ? " · read-only" : ""}</div>
           <div class="foot">
             ${a.service_id ? `<span class="hint">id: ${esc(a.service_id)} · v${esc(a.version)}</span>` : `<span class="hint">v${esc(a.version)}</span>`}
             <span class="spacer"></span>
@@ -160,6 +192,14 @@
       $("user_intents").value = (a.user_intents || []).join("\n");
       $("service_id").value = a.service_id || "";
       $("version").value = a.version || "1";
+      $("domains").value = (a.domains || []).join(", ");
+      $("intent_aliases").value = (a.intent_aliases || []).join("\n");
+      $("routing_policy").value = a.routing_policy || "on_request";
+      const modes = a.modes || ["bridge"];
+      $("mode_bridge").checked = modes.includes("bridge");
+      $("mode_task").checked = modes.includes("task");
+      $("side_effects").checked = a.side_effects !== false;
+      $("user_data").checked = !!a.user_data;
       const editing = !!a.id;
       $("form-title").textContent = editing ? "Edit agent" : "Register an agent";
       $("submit-btn").textContent = editing ? "Save changes" : "Register agent";
@@ -198,7 +238,14 @@
         user_intents: splitLines($("user_intents").value),
         service_id: $("service_id").value.trim() || null,
         version: $("version").value.trim() || "1",
+        domains: splitCsv($("domains").value),
+        intent_aliases: splitLines($("intent_aliases").value),
+        routing_policy: $("routing_policy").value,
+        modes: [$("mode_bridge").checked && "bridge", $("mode_task").checked && "task"].filter(Boolean),
+        side_effects: $("side_effects").checked,
+        user_data: $("user_data").checked,
       };
+      if (payload.modes.includes("task")) payload.events = ["callback", "ws"];
       const id = $("agent-id").value;
       try {
         if (id) {

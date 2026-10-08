@@ -20,15 +20,17 @@ from routes.task_routes import router
 from routes.messaging_routes import router as messaging_router
 from routes.agent_routes import router as agent_router
 from websocket_handler import websocket_endpoint
-from developer_ws import (
+from orchestrator import (
     developer_websocket_endpoint,
     preload_piper_voice,
     preload_silero_vad,
     preload_vosk_model,
     warm_recognizer_pool_with_tts,
 )
-from developer_ws import registry as developer_registry
-import agents_registry
+from orchestrator import registry as developer_registry
+from orchestrator.tasks.routes import router as orchestrator_router
+from orchestrator.routing.router import get_router
+from orchestrator.tasks.service import get_service
 
 # Directory holding the registration website's static files (repo-root
 # agent_directory/, deployable independently of this service). Resolved from
@@ -41,12 +43,6 @@ _STATIC_DIR = os.path.join(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure the developer agent registry table exists before serving requests.
-    try:
-        agents_registry.ensure_agents_table()
-        print("[main] agents table ensured")
-    except Exception as e:
-        print(f"[main] agents table ensure failed: {e}")
     # Warm Vosk during startup so the first STT call doesn't pay 5–10s of cold-load.
     try:
         await preload_vosk_model()
@@ -67,7 +63,24 @@ async def lifespan(app: FastAPI):
     # 1.5-3 s on its first utterance. Startup isn't delayed; a turn that starts
     # before warm-up finishes just gets a cold recognizer.
     app.state.stt_warmup = asyncio.create_task(_warm_stt_pool())
+    # Orchestrator v2 (ORCHESTRATOR_V2_TOOL_CALLS.md): outbox sweep, stall check,
+    # router snapshot. The schema comes from deploy/migrate.sh, and the routing
+    # backfill from deploy/app_backend/backfill_agent_routing.py, both run at
+    # deploy time; the app never creates tables.
+    try:
+        await get_service().start()
+        print("[main] task service started")
+    except Exception as e:
+        print(f"[main] task service start failed: {e}")
+    try:
+        await asyncio.to_thread(get_router().load_now)
+    except Exception as e:
+        print(f"[main] router warm-up failed: {e}")
     yield
+    try:
+        await get_service().stop()
+    except Exception:
+        pass
 
 
 async def _warm_stt_pool() -> None:
@@ -109,6 +122,8 @@ async def _no_stale_site(request, call_next):
 # Include all HTTP endpoints from routes
 app.include_router(router)
 app.include_router(messaging_router)
+# Before agent_router so /api/agents/search isn't captured by /api/agents/{agent_id}.
+app.include_router(orchestrator_router)
 app.include_router(agent_router)
 
 # Register WebSocket endpoints
@@ -121,12 +136,12 @@ async def developer_ping(user_id: str, payload: dict | None = Body(default=None)
     """Service-initiated call hook.
 
     Called by: any external service that wants main to initiate the bridge back to it.
-    The reference caller is `_ping_main` in `developer_ws/testing/echo_server.py`,
-    but any HTTP client can hit this route. See `developer_ws/BRIDGE_PROTOCOL.md`.
+    The reference caller is `_ping_main` in `orchestrator/testing/echo_server.py`,
+    but any HTTP client can hit this route. See `orchestrator/BRIDGE_PROTOCOL.md`.
 
     Flow:
       1. Read `service_id` + `version` from the JSON body (if any).
-      2. Look up the live session via `developer_ws.registry.get(user_id)`.
+      2. Look up the live session via `orchestrator.registry.get(user_id)`.
       3. If a session exists, call `pipeline.on_service_ping(service_id=...)` which
          speaks the announcement and dials the bridge to `DEVELOPER_WS_REMOTE_BRIDGE_URL`.
     """

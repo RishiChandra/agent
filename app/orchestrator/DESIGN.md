@@ -1,4 +1,6 @@
-# developer_ws — design overview
+# Orchestrator voice session: design overview
+
+(Directory layout and what each file does: [README.md](README.md).)
 
 A self-contained voice-loop subsystem hung off `/ws/developer/{user_id}` on main. One
 session corresponds to one mic-bearing client. Audio flows through a Pipecat
@@ -15,7 +17,7 @@ For wire-protocol details against the bridge see [BRIDGE_PROTOCOL.md](BRIDGE_PRO
 ## Component map
 
 ```
-                       ┌─────────────────────────── app/developer_ws ────────────────────────────┐
+                       ┌─────────────────────────── app/orchestrator ────────────────────────────┐
                        │                                                                          │
    /ws/developer/{id} ─►  endpoint.py ──► SpeechPipeline (pipeline.py)                            │
                        │       │                  │                                               │
@@ -131,9 +133,22 @@ Two flow modes coexist:
   `transcript=…` log line carries `warm=True/False`.
 - [`tts.py`](tts.py) — Piper TTS helper, preloaded during app startup. Called from
   `PiperTTSProcessor`.
-- [`tools.py`](tools.py) — OpenAI-shaped tool schemas. Currently only
-  `start_remote_audio_bridge`. Forwarded to Gemini via `tools_schema=`; handlers
-  live in `pipeline._register_tools`.
+- [`tools.py`](tools.py) — OpenAI-shaped tool schemas: `route_to_agent`,
+  `find_agents`, `manage_task`, `end_conversation` and `google_search`
+  (server-side). Handlers live in `pipeline._register_tools`. Free-form details
+  are passed as name/value pairs (`pairs_to_dict`), because Gemini function
+  schemas need non-empty object properties.
+- **Routing and background tasks** live in [`routing/` and `tasks/`](README.md)
+  (spec: `ORCHESTRATOR_V2_TOOL_CALLS.md`). The pipeline's handlers resolve the
+  agent with the in-memory router, apply the connect-vs-dispatch policy and the
+  validation gate (slot grounding, self-corrections, read-backs for agents with
+  side effects), and speak every outcome as a fixed line from
+  `speech.py`. Background tasks go through `TaskService`
+  (`tasks/service.py`). The pipeline subscribes to its announcements
+  for this user, holds them while a live call is open (`_held`), and announces
+  undelivered results after the connect greeting. Pending yes/no questions
+  (read-backs, offers, escalations) are kept in `_pending` and resolved by
+  `manage_task(confirm|decline)`.
 
 ### The bridge
 - [`bridge.py`](bridge.py) — outbound WebSocket to a remote service. Owns the

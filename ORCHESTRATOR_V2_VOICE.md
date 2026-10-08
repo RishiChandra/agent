@@ -14,11 +14,9 @@ The two decisions are coupled. The orchestrator's job is tool decisions, and
 the voice architecture decides where that decision is made and whether it can
 be intercepted before anything is spoken or executed (§14).
 
-**Section numbers are shared** with the companion doc so cross-references stay
-stable: §0–7 and §14 are in [ORCHESTRATOR_V2_VOICE.md](ORCHESTRATOR_V2_VOICE.md);
-§8–13 and the appendices (§15–16) are in
-[ORCHESTRATOR_V2_TOOL_CALLS.md](ORCHESTRATOR_V2_TOOL_CALLS.md). A § number not in
-this file is in the other one.
+**Cross-references.** "Tool doc §x" points into
+[ORCHESTRATOR_V2_TOOL_CALLS.md](ORCHESTRATOR_V2_TOOL_CALLS.md) (Part 1 §1.x:
+routing and dispatch; Part 2 §2.x: reliable tool calls). Plain §x is this doc.
 
 **Sourcing.** Qwen3-Omni architecture facts come from its technical report.
 Hosted-API facts come from vendor docs and secondary write-ups, marked
@@ -60,7 +58,7 @@ Hosted-API facts come from vendor docs and secondary write-ups, marked
    **self-hosted Qwen3-Omni** as the option that uniquely lets us edit the
    Thinker's text before the Talker speaks it, if exact in-voice acks or data
    residency become requirements.
-3. **Gate any switch on the tool-call eval** (§12, in the tool-calls doc). Latency
+3. **Gate any switch on the tool-call eval** (tool doc §2.5). Latency
    gains don't count if tool-decision accuracy drops.
 
 ---
@@ -68,7 +66,7 @@ Hosted-API facts come from vendor docs and secondary write-ups, marked
 ## 1. Context: the orchestrator today
 
 The orchestrator is the `/ws/developer/{user_id}` voice session in
-`app/developer_ws/`. It is not Kairos (`/ws/{user_id}`), which already runs on
+`app/orchestrator/`. It is not Kairos (`/ws/{user_id}`), which already runs on
 a native-audio Gemini model and is just another agent behind the router.
 
 ```
@@ -92,7 +90,7 @@ Facts from the code that matter for both decisions:
 - **Tool results never reach Gemini.** `agents/gemini_client._messages_to_contents`
   drops `tool`-role messages, so the model can't reason over a tool result.
 - **Vosk garbles agent names.** "Kairos" becomes "cut in", "cairo's" or "kai
-  ross". The router's phonetic matching exists because of this (Appendix A).
+  ross". The router's phonetic matching exists because of this (tool doc §1.3).
 - **Only text leaves the VM.** Vosk and Piper run locally on a 2-OCPU, 12 GB
   ARM VM with no GPU, in `us-sanjose-1` (`OCI_INFRASTRUCTURE.md`).
 
@@ -148,7 +146,7 @@ buffering. Real time to first audio for the user is therefore somewhat
 - **Connect greeting:** first audio 0.35 s after the WebSocket opened.
 - **Vosk accuracy, from the benchmark:** "kairos" → "cairo's", "nopa" →
   "notebook", "tonight" → "to night". Name garbles are routine, which supports
-  the router's phonetic matching and argument grounding (§11.3).
+  the router's phonetic matching and argument grounding (tool doc §2.4).
 
 ### 1.2 Root cause of the STT stall (2026-10-06)
 
@@ -178,7 +176,7 @@ to `vosk-model-en-us-0.22-lgraph` in 256 ms chunks, isolated the cause.
   uses ~745 MiB of its 3 GiB limit.
 
 **Fix (implemented 2026-10-06, image `step10`): a process-wide pool of warm
-recognizers** (`RecognizerPool` in `app/developer_ws/stt.py`).
+recognizers** (`RecognizerPool` in `app/orchestrator/stt.py`).
 - `StreamingTranscriber` borrows a recognizer from the pool at
   `UserStartedSpeakingFrame` and returns it after `finalize()`.
 - At startup, the pool is warmed in the background with one Piper-synthesised
@@ -240,10 +238,11 @@ warm recognizer (`warm=True`).
 - **Still a small sample** (3 turns per run). The fixed STT backlog is clear
   well beyond the noise, but the other hops' variation is within the noise.
 
-The foundation built on branch `claude/orchestrator-upgrade-routing-o7cnph`
-(router, protocol v2, task dispatcher; Appendix A) is assumed by both parts. It
-turns "every agent is a tool" into a bounded tool surface: `find_agents`,
-`dispatch_task`, `start_remote_audio_bridge`, plus task management.
+The routing and dispatch layer (router, validation gate, Protocol 2, task
+service; tool doc Part 1) is assumed by every option below. It turns "every
+agent is a tool" into a bounded tool surface: `route_to_agent`, `find_agents`
+and `manage_task`. Because tool calls are checked in code before they run,
+every voice option that keeps tool calls in text keeps those checks.
 
 ---
 
@@ -255,7 +254,7 @@ are the criteria in §6.
 | # | Requirement | Why it is orchestrator-specific |
 |---|---|---|
 | R1 | **Tool-decision accuracy on spoken input** | A wrong call means a real task dispatched to a real agent, possibly with side effects (tool-call doc) |
-| R2 | **Interceptable decisions** | We want to validate a tool call, or rewrite what will be said, *before* it is executed or spoken (§11) |
+| R2 | **Interceptable decisions** | We want to validate a tool call, or rewrite what will be said, *before* it is executed or spoken (tool doc §2.3–2.4) |
 | R3 | **Exact speech for state-carrying lines** | Bridge acks, disambiguation questions, refusals and task results are fixed strings, and the prompt keys off some of them |
 | R4 | **Bridge handoff** | Mic audio must be redirected to a remote agent and then resumed, with the model told what happened |
 | R5 | **Async result delivery** | Task results arrive minutes later and must be spoken when the user is idle, held while bridged |
@@ -314,7 +313,7 @@ of B and C combined: one model, but with a text seam we control.
 - **Qwen-Live-Harness** does the same at the application level: a realtime
   Omni session stays in the foreground while a coordinator delegates
   background work and queues results for announcement. This is structurally
-  our dispatcher plus held announcements (Appendix A).
+  our task service plus held announcements (tool doc §1.6).
 
 The point for us: D keeps **the tool decision in text**, where the tool-call doc's
 validation gate applies unchanged, while gaining native turn-taking and
@@ -388,7 +387,7 @@ inference. Interception is the stated purpose of the design.
    apply as-is. It is a half-cascade with no separate ASR and TTS hops.
 2. **It is the only option with a seam between deciding and speaking.** When
    self-hosted, the serving loop can:
-   - run the validation gate (§11.3) on a Thinker tool call *before* the
+   - run the validation gate (tool doc §2.4) on a Thinker tool call *before* the
      Talker says "Sure, booking that now";
    - **replace** the Thinker's text with a fixed handler string ("Did you mean
      Atlas or Atlas Travel?") and have the Talker voice it in the same voice.
@@ -462,7 +461,7 @@ but it costs infrastructure and its open weights lag on tool use.
    step 3.
    - **Instrument permanently:** log one structured line per turn with the
      timestamps used in §1.1 (speech end, stop signal, STT start and end, LLM
-     start and end, TTS first chunk, first downlink byte), so the eval (§12)
+     start and end, TTS first chunk, first downlink byte), so the eval (tool doc §2.5)
      reports latency per option.
 3. **Prototype option D** behind a provider-neutral `RealtimeVoiceSession`
    adapter (sketch below). Gemini Live is the default frontend (same vendor,
@@ -473,7 +472,7 @@ but it costs infrastructure and its open weights lag on tool use.
    with R9), data residency or per-minute cost at scale become hard
    requirements. Start with a one-day spike: verify the Talker text-injection
    hook on Qwen3-Omni in vLLM-Omni.
-5. **Switch only on evidence.** Run §12's eval on A and D. Move to D only if
+5. **Switch only on evidence.** Run the tool doc's §2.5 eval on A and D. Move to D only if
    the tool-decision metrics hold and latency improves.
 
 ```
@@ -487,7 +486,7 @@ interface RealtimeVoiceSession:                    # one per user session, provi
 
 OrchestratorVoiceLoop:
     on mic pcm:     bridge.active ? bridge.send(pcm) : session.send_audio(pcm)
-    on tool_call:   verdict = validation_gate(call, transcript)        # §11.3, same for every option
+    on tool_call:   verdict = validation_gate(call, transcript)        # tool doc §2.4, same for every option
                     result  = verdict.ok ? await HANDLERS[name](args) : verdict.spoken_reason
                     session.send_tool_result(id, result)
     on task update: bridge.active ? hold(rec) : session.inject_text(summary, schedule=WHEN_IDLE)
@@ -563,5 +562,5 @@ reason this doc prefers them over C.
 - Speech LLMs as implicit ASR: [arXiv 2602.17598](https://arxiv.org/abs/2602.17598)
   (carried over, not re-read)
 - [Qwen-Live-Harness](https://github.com/QwenLM/Qwen-Live-Harness) (carried over)
-- Repo: `app/developer_ws/DESIGN.md`, `app/developer_ws/pipecat_llm.py`,
+- Repo: `app/orchestrator/DESIGN.md`, `app/orchestrator/pipecat_llm.py`,
   `OCI_INFRASTRUCTURE.md`

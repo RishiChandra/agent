@@ -7,7 +7,7 @@ Two audiences share one `agents` table (see `agents_registry.py`):
     Open (no auth) for v1.
 
   * **Self-registering services** use `/developer/register` + `/developer/unregister`
-    per `developer_ws/BUILD_SERVICE_PROMPT.md`. A running relay service POSTs its
+    per `orchestrator/BUILD_SERVICE_PROMPT.md`. A running relay service POSTs its
     current `public_url` on startup; the orchestrator later dials whatever URL is
     registered for that `service_id`.
 
@@ -15,9 +15,10 @@ Both write to the same store, so an agent added on the website and one that
 self-registers are routable the same way by `agents_registry.resolve_bridge_url`.
 """
 
+import asyncio
 import logging
 import traceback
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -42,6 +43,20 @@ class AgentCreateRequest(BaseModel):
     service_id: Optional[str] = None
     version: str = "1"
     extra: Optional[dict] = None  # any additional free-form agent_info keys
+    # Orchestrator v2 capability and routing fields (ORCHESTRATOR_V2_TOOL_CALLS.md §1.3, §1.7).
+    modes: Optional[List[str]] = None
+    task_ops: Optional[List[str]] = None
+    events: Optional[List[str]] = None
+    binding: Optional[str] = None
+    max_concurrency: Optional[int] = None
+    max_reply_latency_s: Optional[float] = None
+    default_deadline_s: Optional[float] = None
+    side_effects: Optional[bool] = None
+    user_data: Optional[bool] = None
+    domains: Optional[List[str]] = None
+    intent_aliases: Optional[List[str]] = None
+    routing_policy: Optional[str] = None
+    slots: Optional[List[dict]] = None
 
 
 class AgentUpdateRequest(BaseModel):
@@ -54,6 +69,20 @@ class AgentUpdateRequest(BaseModel):
     service_id: Optional[str] = None
     version: Optional[str] = None
     active: Optional[bool] = None
+    # Orchestrator v2 capability and routing fields (ORCHESTRATOR_V2_TOOL_CALLS.md §1.3, §1.7).
+    modes: Optional[List[str]] = None
+    task_ops: Optional[List[str]] = None
+    events: Optional[List[str]] = None
+    binding: Optional[str] = None
+    max_concurrency: Optional[int] = None
+    max_reply_latency_s: Optional[float] = None
+    default_deadline_s: Optional[float] = None
+    side_effects: Optional[bool] = None
+    user_data: Optional[bool] = None
+    domains: Optional[List[str]] = None
+    intent_aliases: Optional[List[str]] = None
+    routing_policy: Optional[str] = None
+    slots: Optional[List[dict]] = None
 
 
 # ===== Self-registration models (BUILD_SERVICE_PROMPT contract) =====
@@ -64,6 +93,25 @@ class RegisterRequest(BaseModel):
     # Optional niceties so a self-registered service shows up well on the site.
     name: Optional[str] = None
     description: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    capabilities: Optional[List[str]] = None
+    user_intents: Optional[List[str]] = None
+    # Heartbeat reconciliation (required in task mode): tasks still being worked on.
+    open_task_ids: Optional[List[str]] = None
+    # Orchestrator v2 capability and routing fields (ORCHESTRATOR_V2_TOOL_CALLS.md §1.3, §1.7).
+    modes: Optional[List[str]] = None
+    task_ops: Optional[List[str]] = None
+    events: Optional[List[str]] = None
+    binding: Optional[str] = None
+    max_concurrency: Optional[int] = None
+    max_reply_latency_s: Optional[float] = None
+    default_deadline_s: Optional[float] = None
+    side_effects: Optional[bool] = None
+    user_data: Optional[bool] = None
+    domains: Optional[List[str]] = None
+    intent_aliases: Optional[List[str]] = None
+    routing_policy: Optional[str] = None
+    slots: Optional[List[dict]] = None
 
 
 class UnregisterRequest(BaseModel):
@@ -75,9 +123,10 @@ class UnregisterRequest(BaseModel):
 # ---------------------------------------------------------------------------
 @router.get("/api/agents")
 def api_list_agents(active_only: bool = False):
-    """List registered agents (newest first). `?active_only=true` hides inactive ones."""
+    """List registered agents, sorted by name. `?active_only=true` hides inactive ones."""
     try:
-        return {"agents": agents_registry.list_agents(active_only=active_only)}
+        agents = [agents_registry.public_view(a) for a in agents_registry.list_agents(active_only=active_only)]
+        return {"agents": agents}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"failed to list agents: {e}")
@@ -88,13 +137,15 @@ def api_get_agent(agent_id: str):
     agent = agents_registry.get_agent(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="agent not found")
-    return agent
+    return agents_registry.public_view(agent)
 
 
 @router.post("/api/agents", status_code=201)
 def api_create_agent(req: AgentCreateRequest):
+    extra = dict(req.extra or {})
+    extra.update(req.model_dump(include=set(agents_registry.V2_FIELDS), exclude_none=True))
     try:
-        return agents_registry.create_agent(
+        return agents_registry.public_view(agents_registry.create_agent(
             name=req.name.strip(),
             url=req.url.strip(),
             description=(req.description or "").strip(),
@@ -103,9 +154,9 @@ def api_create_agent(req: AgentCreateRequest):
             user_intents=[u.strip() for u in req.user_intents if u.strip()],
             service_id=(req.service_id.strip() if req.service_id else None),
             version=(req.version or "1").strip(),
-            extra=req.extra or {},
+            extra=extra,
             source="web",
-        )
+        ))
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"failed to create agent: {e}")
@@ -125,7 +176,7 @@ def api_update_agent(agent_id: str, req: AgentUpdateRequest):
         raise HTTPException(status_code=500, detail=f"failed to update agent: {e}")
     if updated is None:
         raise HTTPException(status_code=404, detail="agent not found")
-    return updated
+    return agents_registry.public_view(updated)
 
 
 @router.delete("/api/agents/{agent_id}")
@@ -144,34 +195,44 @@ def api_delete_agent(agent_id: str):
 # Self-registration  (/developer/register, /developer/unregister)
 # ---------------------------------------------------------------------------
 @router.post("/developer/register")
-def developer_register(req: RegisterRequest):
-    """Store/refresh a self-registering service's `service_id -> public_url` mapping.
+async def developer_register(req: RegisterRequest):
+    """Store/refresh a self-registering service, and act as its heartbeat.
 
-    Contract per BUILD_SERVICE_PROMPT.md: respond `{"ok": true, "service_id": ...}`
-    on success, or `{"ok": false, "reason": ...}` on failure (services exit non-zero
-    on a false response, so keep the reason human-readable).
+    Contract per BUILD_SERVICE_PROMPT.md / BRIDGE_PROTOCOL.md "Registration":
+    respond `{"ok": true, "service_id": ...}` on success, or
+    `{"ok": false, "reason": ...}` on failure (services exit non-zero on a
+    false response, so keep the reason human-readable). If the body lists
+    `open_task_ids`, tasks the orchestrator thinks this service has but it
+    doesn't list are marked lost (ORCHESTRATOR_V2_TOOL_CALLS.md §1.7).
     """
     service_id = (req.service_id or "").strip()
     public_url = (req.public_url or "").strip()
     if not service_id or not public_url:
         return {"ok": False, "reason": "service_id and public_url are required"}
-    log.info(
-        "register service_id=%s public_url=%s version=%s",
-        service_id, public_url, req.version,
+    log.info("register service_id=%s public_url=%s version=%s", service_id, public_url, req.version)
+    fields: dict[str, Any] = req.model_dump(
+        include={*agents_registry.V2_FIELDS, "keywords", "capabilities", "user_intents"}, exclude_none=True,
     )
     try:
-        agents_registry.upsert_registration(
-            service_id=service_id,
-            public_url=public_url,
-            version=(req.version or "1"),
-            name=(req.name or None),
-            description=(req.description or ""),
+        agent = await asyncio.to_thread(
+            lambda: agents_registry.upsert_registration(
+                service_id=service_id, public_url=public_url, version=(req.version or "1"),
+                name=(req.name or None), description=(req.description or ""), fields=fields,
+            )
         )
-        return {"ok": True, "service_id": service_id}
     except Exception as e:
         traceback.print_exc()
         log.warning("register failed service_id=%s err=%s", service_id, e)
         return {"ok": False, "reason": f"registration failed: {e}"}
+    lost = 0
+    if req.open_task_ids is not None:
+        try:
+            from orchestrator.tasks.service import get_service
+
+            lost = await get_service().reconcile(agent["id"], req.open_task_ids)
+        except Exception:
+            log.exception("heartbeat reconciliation failed service_id=%s", service_id)
+    return {"ok": True, "service_id": service_id, "agent_id": agent["id"], "lost_tasks": lost}
 
 
 @router.post("/developer/unregister")

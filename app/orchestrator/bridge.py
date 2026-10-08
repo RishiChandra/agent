@@ -5,9 +5,14 @@ and back unchanged. Activation is requested by Gemini via the start_remote_audio
 
 Handshake (before any audio flows):
 
-    main → remote:  {"type":"hello","user_id":"...","version":"1"}
-    remote → main:  {"type":"ack","accept":true,"service_id":"...","version":"1"}
+    main → remote:  {"type":"hello","user_id":"...","version":"2","mode":"bridge",
+                     "session_id":"...","contextId":"...","task_id":"..."(optional)}
+    remote → main:  {"type":"ack","accept":true,"service_id":"...","version":"1"|"2"}
                   or {"type":"ack","accept":false,"reason":"..."}
+
+v1 services ignore the extra hello fields. During a live call a v2 agent may
+send `task.created` to hand ongoing work off as a background task; main replies
+with `task.ack {task_id, callback}` on the same socket (BRIDGE_PROTOCOL.md).
 
 A missing/late/malformed ack is logged distinctly so it's clear whether the remote
 didn't pick up, rejected the call, or spoke protocol garbage.
@@ -20,6 +25,7 @@ import base64
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
@@ -33,13 +39,17 @@ log = logging.getLogger("developer_ws")
 
 OnRemoteClose = Callable[[], Awaitable[None]]
 OnSayText = Callable[[str], Awaitable[bool]]
+# (message body, contextId) -> reply body for task.ack, or raises to nack.
+OnTaskCreated = Callable[[dict, Optional[str]], Awaitable[dict]]
 
 REMOTE_BRIDGE_URL = os.environ.get(
     "DEVELOPER_WS_REMOTE_BRIDGE_URL", "ws://localhost:8001/relay"
 )
 
-BRIDGE_PROTOCOL_VERSION = "1"
+BRIDGE_PROTOCOL_VERSION = "2"
 BRIDGE_ACK_TIMEOUT_S = float(os.environ.get("DEVELOPER_WS_BRIDGE_ACK_TIMEOUT_S", "5.0"))
+# A black-holed tunnel must not hang the turn on TCP/TLS (open_timeout).
+BRIDGE_CONNECT_TIMEOUT_S = float(os.environ.get("DEVELOPER_WS_BRIDGE_CONNECT_TIMEOUT_S", "5.0"))
 
 # Outcome categories used by the pipeline to choose a TTS message.
 OUTCOME_OK = "ok"
@@ -100,6 +110,10 @@ class RemoteAudioBridge:
         # is asking main to TTS the text and play it to the user. If unset, say
         # frames are silently dropped.
         self._on_say_text: Optional[OnSayText] = None
+        self._on_task_created: Optional[OnTaskCreated] = None
+        self._context_id: Optional[str] = None
+        self.agent_id: str = ""
+        self.agent_name: str = ""
         # True while close() is unwinding; tells _recv_loop's finally not to fire on_remote_close.
         self._self_closing = False
         # Frame counters for diagnostic logging on disconnect.
@@ -125,11 +139,23 @@ class RemoteAudioBridge:
         """
         self._on_say_text = cb
 
+    def set_on_task_created(self, cb: Optional[OnTaskCreated]) -> None:
+        """Register the handler for `task.created` hand-offs (pipeline → TaskService.adopt)."""
+        self._on_task_created = cb
+
     @property
     def active(self) -> bool:
         return self._active
 
-    async def start(self, url: str = REMOTE_BRIDGE_URL) -> BridgeStartResult:
+    async def start(
+        self,
+        url: str = REMOTE_BRIDGE_URL,
+        *,
+        context_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        agent_id: str = "",
+        agent_name: str = "",
+    ) -> BridgeStartResult:
         """Open the outbound WS and complete the hello/ack handshake.
 
         Called by: the `start_remote_audio_bridge` tool handler in
@@ -151,7 +177,7 @@ class RemoteAudioBridge:
 
         log.info("bridge connecting user_id=%s url=%s", self._user_id, url)
         try:
-            self._ws = await websockets.connect(url, max_size=None)
+            self._ws = await websockets.connect(url, max_size=None, open_timeout=BRIDGE_CONNECT_TIMEOUT_S)
         except Exception as e:
             log.warning(
                 "bridge connect failed user_id=%s url=%s err=%s",
@@ -161,11 +187,19 @@ class RemoteAudioBridge:
                 ok=False, outcome=OUTCOME_CONNECT_FAILED, detail=str(e)
             )
 
+        self._context_id = context_id
+        self.agent_id, self.agent_name = agent_id, agent_name
         hello = {
             "type": "hello",
             "user_id": self._user_id,
             "version": BRIDGE_PROTOCOL_VERSION,
+            "mode": "bridge",
+            "session_id": uuid.uuid4().hex[:12],
         }
+        if context_id:
+            hello["contextId"] = context_id
+        if task_id:
+            hello["task_id"] = task_id
         try:
             await self._ws.send(json.dumps(hello))
             log.info("bridge hello sent user_id=%s", self._user_id)
@@ -245,7 +279,7 @@ class RemoteAudioBridge:
 
         service_id = str(ack.get("service_id", ""))
         remote_version = str(ack.get("version", "?"))
-        if remote_version != "?" and remote_version != BRIDGE_PROTOCOL_VERSION:
+        if remote_version not in ("?", "1", BRIDGE_PROTOCOL_VERSION):
             log.warning(
                 "bridge version mismatch user_id=%s ours=%s theirs=%s — proceeding anyway",
                 self._user_id, BRIDGE_PROTOCOL_VERSION, remote_version,
@@ -316,6 +350,9 @@ class RemoteAudioBridge:
                         if ctrl_type == "say":
                             await self._handle_say(ctrl)
                             continue
+                        if ctrl_type == "task.created":
+                            await self._handle_task_created(ctrl)
+                            continue
                 pcm = self._extract_downlink_pcm(raw)
                 if pcm:
                     self._frames_recv += 1
@@ -385,6 +422,25 @@ class RemoteAudioBridge:
             log.exception(
                 "bridge on_say_text raised user_id=%s", self._user_id,
             )
+
+    async def _handle_task_created(self, msg: dict) -> None:
+        """A live agent handed off ongoing work: register it, reply ack/nack."""
+        reply: dict
+        try:
+            if self._on_task_created is None:
+                raise RuntimeError("background tasks are not available")
+            body = await self._on_task_created(msg.get("body") or {}, msg.get("contextId") or self._context_id)
+            reply = {"type": "task.ack", "reply_to": msg.get("msg_id"), "task_id": body.get("task_id"), "body": body}
+            log.info("bridge task.created adopted user_id=%s task_id=%s", self._user_id, body.get("task_id"))
+        except Exception as e:
+            reply = {"type": "task.nack", "reply_to": msg.get("msg_id"),
+                     "body": {"code": getattr(e, "code", "invalid_input"), "message": str(e)[:200]}}
+            log.info("bridge task.created rejected user_id=%s: %s", self._user_id, e)
+        if self._ws is not None:
+            try:
+                await self._ws.send(json.dumps(reply))
+            except Exception:
+                log.exception("bridge task.created reply failed user_id=%s", self._user_id)
 
     @staticmethod
     def _extract_downlink_pcm(raw) -> bytes | None:

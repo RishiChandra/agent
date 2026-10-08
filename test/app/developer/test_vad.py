@@ -1,4 +1,4 @@
-"""Unit tests for developer_ws/vad.py (Silero VAD endpointing wrapper).
+"""Unit tests for orchestrator/vad.py (Silero VAD endpointing wrapper).
 
 Runs without pipecat/onnxruntime installed: `SileroVAD` takes an injected
 analyzer, and these tests drive it with a scripted fake that replays the
@@ -24,12 +24,12 @@ from unittest.mock import patch
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 sys.path.insert(0, os.path.join(project_root, "app"))
 
-# Load vad.py directly by path rather than `from developer_ws.vad import ...`:
+# Load vad.py directly by path rather than `from orchestrator.vad import ...`:
 # the package __init__ pulls in the whole voice pipeline (fastapi, pipecat, …),
 # none of which these unit tests need — vad.py itself only needs audio_codec.
 _spec = importlib.util.spec_from_file_location(
     "developer_ws_vad_under_test",
-    os.path.join(project_root, "app", "developer_ws", "vad.py"),
+    os.path.join(project_root, "app", "orchestrator", "vad.py"),
 )
 assert _spec is not None and _spec.loader is not None
 vad_mod = importlib.util.module_from_spec(_spec)

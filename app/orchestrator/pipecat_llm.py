@@ -142,6 +142,10 @@ class CustomGeminiLLMService(LLMService):
         # Set by mark_user_interruption(); consumed (and cleared) by the next
         # TranscriptionFrame so that utterance carries INTERRUPTION_TAG.
         self._interrupted_at: Optional[float] = None
+        # Optional one-shot filter: if it returns True for a transcript, the
+        # turn is recorded but Gemini is not called (e.g. the user's "no" that
+        # already cancelled an indirect route was answered deterministically).
+        self._turn_filter: Optional[Callable[[str], bool]] = None
 
     # Exposed so other code (scratchpad dump, ping handler) can read history.
     @property
@@ -177,6 +181,45 @@ class CustomGeminiLLMService(LLMService):
         """
         self._add_message("assistant", text)
 
+    def recent_user_texts(self, n: int = 3) -> list[str]:
+        """The user's last `n` utterances, oldest first, without the interruption tag.
+
+        Used by the validation gate to check that tool-call values were actually
+        said (ORCHESTRATOR_V2_TOOL_CALLS.md §2.4).
+        """
+        out: list[str] = []
+        for m in reversed(self._context.get_messages()):
+            if (m.get("role") or "") != "user":
+                continue
+            text = m.get("content")
+            if isinstance(text, str) and text.strip():
+                out.append(text.replace(INTERRUPTION_TAG, "").strip())
+            if len(out) >= n:
+                break
+        return list(reversed(out))
+
+    def set_turn_filter(self, fn: Optional[Callable[[str], bool]]) -> None:
+        """Install a one-shot filter for the next transcript (see `_turn_filter`)."""
+        self._turn_filter = fn
+
+    async def answer_directly(self, hint: str) -> None:
+        """Answer the user's last turn with a tool-free Gemini call.
+
+        Used when the orchestrator decides no agent is needed (e.g. a general
+        question routed to an `on_request` agent). `hint` is appended to the
+        system instruction for this call only; it is not stored in history.
+        """
+        # Drop empty assistant placeholders (recorded for tool calls): this call
+        # sends no tools, and an empty model turn can make Gemini reject it.
+        messages = [
+            m for m in self._context.get_messages()
+            if not (m.get("role") == "assistant" and not (m.get("content") or "").strip())
+            and m.get("role") != "tool"
+        ]
+        if messages and (messages[0].get("role") == "system"):
+            messages[0] = {"role": "system", "content": f"{messages[0]['content']}\n\n{hint}"}
+        await self._call_gemini(messages=messages, tool_choice="none")
+
     def mark_user_interruption(self) -> None:
         """Record that the user just interrupted the assistant.
 
@@ -205,6 +248,14 @@ class CustomGeminiLLMService(LLMService):
             if not text:
                 return
             self._add_message("user", self._maybe_tag_interruption(text))
+            turn_filter, self._turn_filter = self._turn_filter, None
+            if turn_filter is not None:
+                try:
+                    if turn_filter(text):
+                        log.info("user_id=%s turn handled by orchestrator: %r", self._user_id, text)
+                        return
+                except Exception:
+                    log.exception("turn filter failed")
             await self._call_gemini()
             return
 
@@ -232,19 +283,19 @@ class CustomGeminiLLMService(LLMService):
 
         await self.push_frame(frame, direction)
 
-    async def _call_gemini(self) -> None:
-        # Local import: agents.gemini_client lives at app-root, not under developer_ws.
+    async def _call_gemini(self, messages: Optional[list] = None, tool_choice: str = "auto") -> None:
+        # Local import: agents.gemini_client lives at app-root, not under orchestrator.
         # We re-import per-call so it can read live env (model id, key) without restart.
         from agents.gemini_client import call_gemini, gemini_response_to_openai_like
 
-        messages = self._context.get_messages()
-        tools = self._tools_schema
+        messages = messages if messages is not None else self._context.get_messages()
+        tools = self._tools_schema if tool_choice != "none" else None
 
         await self.push_frame(LLMFullResponseStartFrame())
         t_llm = time.monotonic()
         try:
             response = await asyncio.to_thread(
-                call_gemini, list(messages), tools, "auto"
+                call_gemini, list(messages), tools, tool_choice if tools else "auto"
             )
         except Exception as e:
             log.warning("gemini generateContent failed user_id=%s err=%s", self._user_id, e)

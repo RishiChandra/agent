@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 from google.genai import types
 from agents import general_thinking_agent
+import kairos_tasks
 from gemini_config import (
     client,
     MODEL,
@@ -30,6 +31,12 @@ generalThinkingAgent = general_thinking_agent.GeneralThinkingAgent()
 
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
     await websocket.accept()
+    # The orchestrator's task-mode connection dials this URL with user_id
+    # "orchestrator" (one socket for every user's background tasks); it gets the
+    # Protocol 2 handler instead of a Gemini Live call. See kairos_tasks.py.
+    if user_id == kairos_tasks.proto.TASK_USER_ID:
+        await kairos_tasks.task_endpoint(websocket)
+        return
     print(f"✅ Client connected with user_id: {user_id}")
 
     def _normalize_text(text: str) -> str:
@@ -119,10 +126,10 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                         msg = await websocket.receive_text()
                         data = json.loads(msg)
 
-                        # Bridge handshake: the developer_ws orchestrator dials this
+                        # Bridge handshake: the orchestrator (app/orchestrator) dials this
                         # endpoint as a registered agent and sends {"type":"hello"},
                         # then waits (~5s) for an ack before relaying any audio — see
-                        # developer_ws/BRIDGE_PROTOCOL.md. Ack immediately and switch
+                        # orchestrator/BRIDGE_PROTOCOL.md. Ack immediately and switch
                         # the downlink to raw PCM: the bridge peer plays `audio`
                         # payloads as PCM and cannot decode Opus TLV.
                         if data.get("type") == "hello":
@@ -131,7 +138,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                                 "type": "ack",
                                 "accept": True,
                                 "service_id": "kairos",
-                                "version": "1",
+                                "version": "2",
+                                "modes": ["bridge", "task"],
                             }))
                             print(f"🤝 Bridge hello acked user_id={user_id} (downlink=PCM)")
                             continue

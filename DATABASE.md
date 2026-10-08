@@ -16,9 +16,26 @@ PostgreSQL 16 install on the VM (not a container). Infrastructure basics are in
 | Application tables (11) | `agents`, `agent_registry`, `chat_members`, `chats`, `jobs`, `messages`, `pending_text_message_jobs`, `relationships`, `sessions`, `tasks`, `users`. Full schema in [Schema](#schema). `agent_tasks` was dropped 2026-10-06 |
 
 Migrated from Azure PostgreSQL Flexible Server `ai-pin-server` (PG 16.14, West US 3). The 2026-09-01 dump was accepted as the
-final copy; the app cut over to `ai_pin_db` on 2026-09-11. There is no migration tool: `agents` is auto-created at app
-startup (`ensure_agents_table`), `jobs` by the worker (`deploy/sql/001_jobs.sql`), and the rest was restored from the dump
-and altered by hand since. [Schema](#schema) below is the source of truth.
+final copy; the app cut over to `ai_pin_db` on 2026-09-11. Most tables were restored from that dump and altered by hand
+since; [Schema](#schema) below is the source of truth.
+
+## Migrations
+
+**The app and the worker never create or alter tables.** Schema changes are SQL files in [`deploy/sql/`](deploy/sql),
+applied by the database owner before the code that needs them is deployed:
+
+```sh
+cd /home/ubuntu/releases/app-backend-step2-20260911   # the synced release directory
+deploy/migrate.sh ai_pin_db
+```
+
+`migrate.sh` applies every file in name order with `ON_ERROR_STOP`. Each file is idempotent (`IF NOT EXISTS`), so re-running
+is safe. Files: `000_agents.sql` (agent registry), `001_jobs.sql` (job queue), `002_agent_outbox.sql` (orchestrator outbox).
+`.sql` files are deliberately not in the Docker image, so migrations run from the release directory on the host.
+
+Data backfills that need app code run as a one-off in the new container after the deploy. Today that is
+`python /app/deploy/app_backend/backfill_agent_routing.py` (first-party routing fields and agent embeddings, ORCHESTRATOR_V2_TOOL_CALLS.md
+§1.3).
 
 ## Schema
 
@@ -94,8 +111,8 @@ The scheduled-wake queue polled by the worker ([SCHEDULER.md](SCHEDULER.md)). De
 | Column | Type | Null | Default | Notes |
 |---|---|---|---|---|
 | `id` | bigint | no | `nextval('jobs_id_seq')` | **PK**. Referenced by `tasks.enqueue_sequence_id` |
-| `kind` | text | no | | `task` or `text_message` |
-| `payload` | jsonb | no | | Wake body forwarded to the device |
+| `kind` | text | no | | `task`, `text_message`, `task_result` (wake the pin for a finished background task) or `agent_task_deadline` (the worker POSTs the payload to the orchestrator's `/internal/tasks/{id}/deadline`; never wakes the device) |
+| `payload` | jsonb | no | | Wake body forwarded to the device; for `agent_task_deadline`, the task's context |
 | `deliver_at` | timestamptz | no | `now()` | |
 | `created_at` | timestamptz | no | `now()` | |
 | `done_at` | timestamptz | yes | | NULL = pending |
@@ -109,11 +126,31 @@ the FK.
 | Column | Type | Null | Default | Notes |
 |---|---|---|---|---|
 | `agent_id` | uuid | no | | **PK** |
-| `agent_info` | jsonb | yes | | `{name, summary, service_id, keywords[], capabilities[], user_intents[], active, …}` |
+| `agent_info` | jsonb | yes | | `{name, summary, service_id, keywords[], capabilities[], user_intents[], active, …}`. Orchestrator v2 adds `modes[]`, `task_ops[]`, `events[]`, `binding`, `max_concurrency`, `max_reply_latency_s`, `default_deadline_s`, `side_effects` (default true), `user_data`, `domains[]`, `intent_aliases[]`, `routing_policy`, `slots[]`, `last_seen`, `routing_embedding[]` (+ `_model`, `_sha`) and `_owner_set` (fields edited on the website, which self-registration won't overwrite) |
 | `agent_url` | text | yes | | Bridge WebSocket URL |
 
-Indexes: `(agent_info->>'service_id')`, `lower(agent_info->>'name')`. Also auto-created by `ensure_agents_table()`
-(now jsonb).
+Indexes: `(agent_info->>'service_id')`, `lower(agent_info->>'name')`. Defined in `deploy/sql/000_agents.sql`.
+
+### `agent_outbox`
+
+Every request the orchestrator sends an agent (dispatch, update, cancel, input, close, delivered) is written here first,
+then sent, and resent with the same `msg_id` until the agent replies ([ORCHESTRATOR_V2_TOOL_CALLS.md](ORCHESTRATOR_V2_TOOL_CALLS.md)
+§1.7). Defined in `deploy/sql/002_agent_outbox.sql` (owner `appuser`).
+
+| Column | Type | Null | Default | Notes |
+|---|---|---|---|---|
+| `id` | bigint | no | serial | **PK**; per task, rows are delivered in id order |
+| `agent_id` | uuid | no | | **FK** → `agents` ON DELETE CASCADE |
+| `task_id` | uuid | no | | **FK** → `tasks` ON DELETE CASCADE |
+| `msg_id` | text | no | | UNIQUE; reused on every resend |
+| `type` | text | no | | `task.dispatch`, `task.update`, … |
+| `envelope` | jsonb | no | | The full Protocol 2 message |
+| `created_at`, `next_attempt_at` | timestamptz | no | `now()` | Backoff schedule |
+| `attempts` | integer | no | `0` | |
+| `sent_at`, `acked_at`, `expired_at` | timestamptz | yes | | `acked_at` set on `task.ack` / `task.nack` |
+| `reply` | jsonb | yes | | The agent's reply |
+
+Indexes: `(agent_id, next_attempt_at) WHERE acked_at IS NULL AND expired_at IS NULL`; `(task_id, id)`.
 
 ### `agent_registry`
 

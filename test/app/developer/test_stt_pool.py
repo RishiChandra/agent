@@ -1,4 +1,4 @@
-"""Unit tests for the pooled Vosk recognizers in developer_ws/stt.py.
+"""Unit tests for the pooled Vosk recognizers in orchestrator/stt.py.
 
 Runs without vosk installed: `RecognizerPool` takes an injected factory, and
 these tests drive it with a fake recognizer that mimics the parts of
@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(project_root, "app"))
 # pipeline (fastapi, pipecat, …), none of which these unit tests need.
 _spec = importlib.util.spec_from_file_location(
     "developer_ws_stt_under_test",
-    os.path.join(project_root, "app", "developer_ws", "stt.py"),
+    os.path.join(project_root, "app", "orchestrator", "stt.py"),
 )
 assert _spec is not None and _spec.loader is not None
 stt = importlib.util.module_from_spec(_spec)

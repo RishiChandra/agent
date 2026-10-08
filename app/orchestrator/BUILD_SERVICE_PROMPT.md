@@ -36,6 +36,11 @@ listener).
 | `BRIDGE_PATH` | `"/relay"` | URL path the WebSocket server serves. Leading slash required. |
 | `SERVICE_ID` | `"<short identifier>"` | This service's name, sent to the orchestrator on every register/ping and reported in the WebSocket ack. Free-form string; a UUID suffix per process helps distinguish runs in the orchestrator's logs. |
 | `ORCHESTRATOR_HTTP_BASE` | `"http(s)://<host>:<port>"` | Base URL of the orchestrator. Used by `register_with_orchestrator()` and `request_orchestrator_call()`. Local-dev example: `"http://localhost:8000"`. |
+| `AGENT_NAME` | `"<spoken name>"` | The name users say to reach this agent ("Weather Bot"). |
+| `AGENT_DESCRIPTION` | `"<one sentence>"` | What the agent does. Used for routing requests that don't name it. |
+| `AGENT_DOMAINS` | `["..."]` | What the agent is the authority for (e.g. `["weather", "forecasts"]`). |
+| `AGENT_INTENT_ALIASES` | `["..."]` | Trigger phrases that should route here even unnamed (e.g. `["will it rain"]`). |
+| `AGENT_SIDE_EFFECTS` | `False` / `True` | `True` if the service books, buys or sends anything (the user hears a read-back first). |
 
 Notice what is **not** in the CONFIG block: there is no `PUBLIC_BRIDGE_URL`
 macro. The dial URL is **discovered at runtime** from the tunnel process, not
@@ -61,6 +66,13 @@ SERVICE_ID = "REPLACE_ME"
 # Base URL of the orchestrator (no trailing slash). Local-dev example:
 # http://localhost:8000
 ORCHESTRATOR_HTTP_BASE = "REPLACE_ME"
+
+# How users find this agent (the orchestrator routes on these).
+AGENT_NAME = "REPLACE_ME"
+AGENT_DESCRIPTION = "REPLACE_ME"
+AGENT_DOMAINS = []          # e.g. ["weather", "forecasts"]
+AGENT_INTENT_ALIASES = []   # e.g. ["will it rain", "forecast"]
+AGENT_SIDE_EFFECTS = False  # True if this service books, buys or sends anything
 # === END CONFIG ===
 
 def _check_macros() -> None:
@@ -152,8 +164,28 @@ accepting any WebSocket connection, the service registers itself.
 
 Request body:
 ```json
-{ "service_id": "<your service id>", "public_url": "wss://<host>/<path>", "version": "1" }
+{
+  "service_id": "<your service id>",
+  "public_url": "wss://<host>/<path>",
+  "version": "1",
+  "name": "<AGENT_NAME>",
+  "description": "<AGENT_DESCRIPTION>",
+  "keywords": ["..."],
+  "user_intents": ["What's the weather in Boston?"],
+  "domains": ["weather"],
+  "intent_aliases": ["forecast", "will it rain"],
+  "side_effects": false
+}
 ```
+
+With hundreds of registered agents, these fields **are** how the orchestrator
+finds yours: users often don't name an agent ("will it rain tomorrow?"), and
+the orchestrator routes by `name`, `description`, `domains`, `intent_aliases`,
+`user_intents` and `keywords`. Send all of them. `side_effects` defaults to
+`true` (the user hears a read-back before your agent is asked to act); send
+`false` only if this service never books, buys or sends anything. The full
+field list, including background-task (task-mode) fields, is in
+`BRIDGE_PROTOCOL.md` "Registration (v2 additions)".
 
 Response body:
 ```json
@@ -181,9 +213,11 @@ orchestrator dials whatever URL is currently registered for that `service_id`.
    `POST {ORCHESTRATOR_HTTP_BASE}/developer/unregister` with body
    `{ "service_id": "<id>" }`. Best-effort — log warnings on failure but do
    not block shutdown.
-4. **Heartbeat (optional but recommended).** Every 5 minutes, re-POST
-   `/developer/register` with the current URL. Lets the orchestrator detect
-   dead services that crashed without unregistering.
+4. **Heartbeat (optional for live-call services, required for task mode).**
+   Every 5 minutes, re-POST `/developer/register` with the current URL. Lets
+   the orchestrator detect dead services that crashed without unregistering.
+   A task-mode service must include `open_task_ids` in every heartbeat
+   (`BRIDGE_PROTOCOL.md` "Liveness").
 
 Implement registration alongside the existing `request_orchestrator_call()`
 in the same Python module so both share one `httpx.AsyncClient`.
@@ -194,7 +228,12 @@ import httpx
 async def register_with_orchestrator(public_url: str) -> dict:
     """Tell the orchestrator how to reach us. MUST succeed before we bind."""
     url = f"{ORCHESTRATOR_HTTP_BASE.rstrip('/')}/developer/register"
-    payload = {"service_id": SERVICE_ID, "public_url": public_url, "version": "1"}
+    payload = {
+        "service_id": SERVICE_ID, "public_url": public_url, "version": "1",
+        "name": AGENT_NAME, "description": AGENT_DESCRIPTION,
+        "domains": AGENT_DOMAINS, "intent_aliases": AGENT_INTENT_ALIASES,
+        "side_effects": AGENT_SIDE_EFFECTS,
+    }
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.post(url, json=payload)
         r.raise_for_status()

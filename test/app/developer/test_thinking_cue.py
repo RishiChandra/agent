@@ -1,7 +1,7 @@
 """Unit tests for the "thinking" pulse.
 
 Two layers:
-  1. `ThinkingPulse` (developer_ws/thinking_cue.py) — the timing/state core. It
+  1. `ThinkingPulse` (orchestrator/thinking_cue.py) — the timing/state core. It
      is deliberately dependency-free (stdlib only), so it is loaded directly by
      path (the package `__init__` pulls in the whole voice stack). Driven with a
      fake audio sink that records the calls the real `AudioIO` would receive.
@@ -26,7 +26,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 
 _spec = importlib.util.spec_from_file_location(
     "developer_ws_thinking_cue_under_test",
-    os.path.join(project_root, "app", "developer_ws", "thinking_cue.py"),
+    os.path.join(project_root, "app", "orchestrator", "thinking_cue.py"),
 )
 assert _spec is not None and _spec.loader is not None
 tc_mod = importlib.util.module_from_spec(_spec)
@@ -182,7 +182,7 @@ class ThinkingPulseTests(unittest.TestCase):
 try:
     if project_root + "/app" not in sys.path:
         sys.path.insert(0, os.path.join(project_root, "app"))
-    from developer_ws.pipecat_bits import ThinkingCueProcessor  # noqa: E402
+    from orchestrator.pipecat_bits import ThinkingCueProcessor  # noqa: E402
     from pipecat.frames.frames import (  # noqa: E402
         BotStartedSpeakingFrame,
         BotStoppedSpeakingFrame,

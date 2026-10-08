@@ -115,7 +115,7 @@ class DownlinkOpusEncoder:
     def disable(self) -> None:
         """Drop the encoder so `uses_opus` is False and downlink passes raw PCM.
 
-        Used for bridge-relay peers (see developer_ws/BRIDGE_PROTOCOL.md), which
+        Used for bridge-relay peers (see orchestrator/BRIDGE_PROTOCOL.md), which
         expect base64 raw PCM and never negotiate Opus.
         """
         self._encoder = None

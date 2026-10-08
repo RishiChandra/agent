@@ -21,9 +21,9 @@ worker's publish.
 ## `jobs` table
 
 `deploy/sql/001_jobs.sql` (owner `appuser`). Columns: `id BIGSERIAL` (stored back into `tasks.enqueue_sequence_id`), `kind`
-(`task` | `text_message`), `payload JSONB` (the wake body), `deliver_at`, `created_at`, `done_at` (NULL = pending), `attempts`.
-Partial index on pending rows by `deliver_at`. The worker also calls `ensure_jobs_table()` at startup, so a fresh DB
-self-provisions; apply the SQL by hand for any brand-new database.
+(`task` | `text_message` | `task_result` | `agent_task_deadline`), `payload JSONB` (the wake body), `deliver_at`, `created_at`, `done_at` (NULL = pending), `attempts`.
+Partial index on pending rows by `deliver_at`. The worker doesn't create the table; it comes from `deploy/migrate.sh`
+([DATABASE.md](DATABASE.md#migrations)).
 
 The enqueue code lives in `app/enqueue/{task_enqueue,edit_task_enqueue,message_enqueue}.py`: `insert_job` / `cancel_job`
 replace the old Service Bus schedule/cancel, and return the `jobs.id` as `sequence_id`. `PUT /tasks` re-enqueues on edit and
@@ -34,7 +34,11 @@ replace the old Service Bus schedule/cancel, and return the `jobs.id` as `sequen
 `app-backend-worker-1`, same image as the app, `command: ["python","/app/listener/worker.py"]`. Defined in
 `docker-compose.oci.yml`; joins `app-backend` (DB) + `aipin_default` (broker). Behavior (`listener/worker.py`): poll every 2 s,
 claim due rows with `FOR UPDATE SKIP LOCKED`, and per job — if the user's `sessions.is_active` is true, defer 1 minute;
-otherwise publish the wake and (for `text_message`) also send a `pending_messages` wake. 5 attempts then give up; **transport
+otherwise publish the wake and (for `text_message`) also send a `pending_messages` wake. Orchestrator background tasks
+(ORCHESTRATOR_V2_TOOL_CALLS.md §1.6) add two kinds, handled first: `task_result` wakes the pin for a finished task (dropped
+if the result was already delivered; deferred while a session is active), and `agent_task_deadline` POSTs the task's
+context to `$ORCHESTRATOR_INTERNAL_URL/internal/tasks/{id}/deadline` (default `http://app:8000`, bearer `INTERNAL_API_TOKEN`
+or a token derived from `DB_PASSWORD`). It never wakes the device; 5xx and connection errors retry without spending an attempt. 5 attempts then give up; **transport
 errors** (broker down) are retried without spending an attempt, so a wake is never lost to a momentary broker outage. A task
 job whose task was deleted or is no longer `pending` is dropped (safety net).
 
@@ -110,7 +114,7 @@ fallback is a poll-on-RTC-timer variant (device pulls the jobs table on a timer)
   and `on_server_wake` fires a plain call; (b) the `/ws/developer` orchestrator has no announce path (its receive loop handles
   only `interrupt`/`audio`/`turn_complete`; the "fetch task and tell the user" logic exists only in the legacy `/ws/` handler,
   `app/websocket_handler.py:235-267`). **Fix:** add a `SpeechPipeline.on_pending_task()` + a `pending_task` branch in
-  `app/developer_ws/endpoint.py` (server, no reflash), and have the firmware relay the wake's `system_message` as the first WS
+  `app/orchestrator/endpoint.py` (server, no reflash), and have the firmware relay the wake's `system_message` as the first WS
   frame after connect (needs a reflash).
 - [ ] **Task-owner identity mismatch.** In the 2026-09-19 test the task was created under user `2ba330c0` while the device
   connects as its compiled identity `4dd16650`. The wake still worked (topic is device-fixed), but the session-active defer

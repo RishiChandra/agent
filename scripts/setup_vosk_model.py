@@ -1,7 +1,7 @@
 """Download the Vosk STT model for local development.
 
 The model directory (~70 MB unpacked) lives at the repo root, matching the path
-``VOSK_MODEL_PATH`` resolves to in ``app/developer_ws/stt.py``. It's not committed
+``VOSK_MODEL_PATH`` resolves to in ``app/orchestrator/stt.py``. It's not committed
 to git — same pattern as ``piper_voices/`` — so a fresh checkout needs to fetch it
 once. Without the model, STT returns "" and the assistant never hears anything.
 

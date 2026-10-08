@@ -9,7 +9,7 @@ and tears them all down on Ctrl-C or when any one exits.
 
 Run from the repo root (where the .venv lives) or anywhere — paths are absolute:
 
-    python app/developer_ws/testing/run_full_test.py
+    python app/orchestrator/testing/run_full_test.py
 
 Override defaults via env or flags:
     USER_ID, MAIN_PORT, ECHO_PORT, CLIENT_WARMUP_S, READY_TIMEOUT_S
@@ -29,7 +29,7 @@ THIS = Path(__file__).resolve()
 APP_DIR = THIS.parents[2]                      # .../agent/app
 REPO_DIR = APP_DIR.parent                       # .../agent
 MAIN_PY = APP_DIR / "main.py"
-ECHO_PY = APP_DIR / "developer_ws" / "testing" / "echo_server.py"
+ECHO_PY = APP_DIR / "orchestrator" / "testing" / "echo_server.py"
 TEST_CLIENT_PY = REPO_DIR / "test" / "app" / "developer" / "test_developer_ws.py"
 
 DEFAULT_USER_ID = "2ba330c0-a999-46f8-ba2c-855880bdcf5b"

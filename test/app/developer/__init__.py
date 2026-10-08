@@ -1,1 +1,1 @@
-"""Manual / integration WebSocket tests for ``app.developer_ws``."""
+"""Manual / integration WebSocket tests for ``app.orchestrator``."""

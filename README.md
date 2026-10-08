@@ -43,7 +43,7 @@ Cross-platform neural TTS. Same ```.onnx``` voice file is used by the local serv
 python scripts/setup_piper_voice.py
 ```
 
-The script idempotently downloads ```en_US-amy-medium``` into ```piper_voices/``` — matches the default in ```app/developer_ws/tts.py``` so no env var change is needed locally. Pick a different voice with ```--voice <id>``` (see [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)).
+The script idempotently downloads ```en_US-amy-medium``` into ```piper_voices/``` — matches the default in ```app/orchestrator/tts.py``` so no env var change is needed locally. Pick a different voice with ```--voice <id>``` (see [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)).
 
 ### 4. Windows: install Opus native library
 
@@ -76,10 +76,10 @@ To test (local vs deployed can be configured in the test), run ```python test/ap
 
 Run ```python -m app.test_proactive_messaging``` from the test directory too to make sure that proactive messaging works
 
-### developer_ws bridge end-to-end test
-Default brings up main, the mic client, and the echo relay (each in its own console) without auto-pinging — say "call the service" to open the bridge: ```python app/developer_ws/testing/run_full_test.py --no-ping``` (drop ```--no-ping``` to have the echo server auto-call main on startup).
-To run manually instead: ```python app/main.py```, then ```python test/app/developer/test_developer_ws.py```, then (from `app/`) ```python developer_ws/testing/echo_server.py``` (append ```--ping <user_id>``` for the auto-call variant).
-See ```app/developer_ws/DESIGN.md``` and ```BRIDGE_PROTOCOL.md``` for architecture and wire protocol.
+### orchestrator bridge end-to-end test
+Default brings up main, the mic client, and the echo relay (each in its own console) without auto-pinging — say "call the service" to open the bridge: ```python app/orchestrator/testing/run_full_test.py --no-ping``` (drop ```--no-ping``` to have the echo server auto-call main on startup).
+To run manually instead: ```python app/main.py```, then ```python test/app/developer/test_developer_ws.py```, then (from `app/`) ```python orchestrator/testing/echo_server.py``` (append ```--ping <user_id>``` for the auto-call variant).
+See ```app/orchestrator/DESIGN.md``` and ```BRIDGE_PROTOCOL.md``` for architecture and wire protocol.
 
 ## Deployment (OCI)
 
@@ -157,9 +157,9 @@ Trade-off: slow speakers or natural mid-thought pauses get cut off. Easy to A/B 
 
 ### 3. Streaming Gemini (token / sentence)
 
-Today [```CustomGeminiLLMService._call_gemini```](app/developer_ws/pipecat_llm.py) does a blocking ```generate_content``` and waits for the full response before any token reaches Piper. Switching to ```generate_content_stream``` lets us aggregate text per sentence and start Piper synthesis on sentence 1 while Gemini is still generating sentence 2/3.
+Today [```CustomGeminiLLMService._call_gemini```](app/orchestrator/pipecat_llm.py) does a blocking ```generate_content``` and waits for the full response before any token reaches Piper. Switching to ```generate_content_stream``` lets us aggregate text per sentence and start Piper synthesis on sentence 1 while Gemini is still generating sentence 2/3.
 
-Expected impact: ~500–1500 ms shaved on multi-sentence replies (compounds with the streaming TTS we already shipped — see [```tts.py```](app/developer_ws/tts.py) ```synthesize_speech_pcm24_stream```).
+Expected impact: ~500–1500 ms shaved on multi-sentence replies (compounds with the streaming TTS we already shipped — see [```tts.py```](app/orchestrator/tts.py) ```synthesize_speech_pcm24_stream```).
 
 Implementation:
 1. Replace the ```call_gemini``` thread call in ```_call_gemini``` with an async iterator over ```client.aio.models.generate_content_stream(...)```.

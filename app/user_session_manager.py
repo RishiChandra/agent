@@ -26,6 +26,22 @@ class UserSessionManager:
         self.build_user_config()
         self.get_live_config()
     
+    @classmethod
+    def config_only(cls, user_id: str) -> UserConfigData:
+        """The user's UserConfigData without opening a session or a Live config.
+
+        For work done outside a live call (Kairos task mode): loads the profile
+        and builds the time/name fields, but leaves the sessions table alone.
+        """
+        self = cls.__new__(cls)
+        self.user_id = user_id
+        self.db_session = None
+        self.user_info = None
+        self.user_config = None
+        self.config = None
+        self.load_user_info()
+        return self.build_user_config()
+
     def initialize_session(self) -> None:
         """Initialize or retrieve the database session for the user."""
         self.db_session = get_session(self.user_id)

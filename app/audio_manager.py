@@ -50,7 +50,7 @@ class AudioManager:
     def disable_downlink_opus(self) -> None:
         """Send downlink audio as raw PCM instead of Opus TLV.
 
-        Called when the peer is the developer_ws bridge (server-to-server relay):
+        Called when the peer is the orchestrator bridge (server-to-server relay):
         it plays `{"audio": <b64>}` payloads as raw PCM and can't decode Opus.
         """
         self._downlink.disable()

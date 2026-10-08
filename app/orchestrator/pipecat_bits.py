@@ -1,4 +1,4 @@
-"""Pipecat FrameProcessors that wire the existing developer_ws components into
+"""Pipecat FrameProcessors that wire the existing orchestrator components into
 a Pipecat Pipeline.
 
 Six custom processors:

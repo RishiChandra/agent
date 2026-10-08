@@ -1,7 +1,7 @@
 -- Postgres-backed job queue. Replaces the Azure Service Bus queue "q1":
 --   * app/enqueue/*.py INSERT rows here (scheduled delivery = deliver_at)
 --   * listener/worker.py polls due rows and wakes the device over MQTT
--- Applied by deploy/restore_db.sh after the pg_dump restore. Idempotent.
+-- Applied by deploy/migrate.sh. Idempotent.
 
 CREATE TABLE IF NOT EXISTS jobs (
     id          BIGSERIAL   PRIMARY KEY,               -- stored in tasks.enqueue_sequence_id

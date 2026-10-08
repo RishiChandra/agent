@@ -1,18 +1,16 @@
-# developer-WS bridge protocol (v1, with v2 draft)
+# developer-WS bridge protocol (v2)
 
 This document describes the wire protocol between the **main** server's
-`developer_ws` pipeline (the orchestrator) and any **remote service** (an
-agent) it talks to. The shipped reference implementation is
-[`testing/echo_server.py`](testing/echo_server.py); this doc is what you'd
-implement against to build your own service.
+orchestrator voice pipeline (`app/orchestrator`) and any **remote service** (an
+agent) it talks to. Reference implementations:
+[`testing/echo_server.py`](testing/echo_server.py) (bridge mode) and
+[`testing/task_agent.py`](testing/task_agent.py) (task mode). This doc is what
+you'd implement against to build your own service.
 
-> **Status.** **v1 (bridge mode) is live**, and everything not marked *DRAFT*
-> describes what main does today. Sections marked **DRAFT (v2)** specify
-> the planned task mode and the v2 additions to bridge mode. Main does **not**
-> implement them yet, and their details may change before they ship. The
-> design rationale is in
-> [`ORCHESTRATOR_V2_TOOL_CALLS.md`](../../ORCHESTRATOR_V2_TOOL_CALLS.md) §10.8. A v1
-> service keeps working unchanged after v2 ships.
+> **Status.** v2 is implemented by main (`app/orchestrator/`). Sections marked
+> **(v2)** are additions over v1. A v1 service keeps working unchanged: it is
+> treated as bridge-only. The design rationale is in
+> [`ORCHESTRATOR_V2_TOOL_CALLS.md`](../../ORCHESTRATOR_V2_TOOL_CALLS.md) §1.7.
 
 The WebSocket is always initiated by main (main → remote), so your service is
 always the **WebSocket server** and main is always the **WebSocket client**.
@@ -25,8 +23,8 @@ Your service reaches main over plain HTTP (`/developer/register`,
 
 | Mode | What it is | Connection | Version |
 |---|---|---|---|
-| `bridge` | **Live call.** The user's mic is relayed to you, and your audio or `say` text is played back | One WebSocket per call, per user | v1 (live). v2 additions are DRAFT |
-| `task` | **Background task.** Main sends you a structured job (JSON), you ack or nack it, and you report progress, questions and a result later. Main can query, update, cancel or close the task at any time | **The task outlives the connection.** Connections are short-lived or pooled, and every message is keyed by `task_id` | **DRAFT (v2)** |
+| `bridge` | **Live call.** The user's mic is relayed to you, and your audio or `say` text is played back | One WebSocket per call, per user | v1, with v2 additions |
+| `task` | **Background task.** Main sends you a structured job (JSON), you ack or nack it, and you report progress, questions and a result later. Main can query, update, cancel or close the task at any time | **The task outlives the connection.** Connections are short-lived or pooled, and every message is keyed by `task_id` | v2 |
 
 Both modes use your **single registered WebSocket URL**. The `mode` field in
 the `hello` tells them apart. A v1 `hello` has no `mode` and means `bridge`.
@@ -48,7 +46,7 @@ shipped today is `ws://localhost:8001/relay` for local development.
 
 ---
 
-## Registration — DRAFT (v2) additions
+## Registration (v2 additions)
 
 Services already register with `POST <MAIN_BASE>/developer/register` (see
 `BUILD_SERVICE_PROMPT.md`). In v2, **registration is where you declare
@@ -82,8 +80,8 @@ on any particular connection.
 | `max_concurrency` | Max tasks you'll run at once (1–1000) | 8 |
 | `max_reply_latency_s` | How long main waits for your `task.ack`/`task.nack` before resending (1–30 for `ws`) | 5 |
 | `default_deadline_s` | Deadline applied when the user states none (see [Deadlines](#deadlines)) | null |
-| `side_effects` | Your tasks act in the world (book, buy, send). Main reads requests back to the user before dispatching | false |
-| `open_task_ids` | On heartbeats: tasks you're still working on (see [Liveness](#liveness)) | omitted |
+| `side_effects` | Your tasks act in the world (book, buy, send). Main reads requests back to the user before dispatching. **Defaults to true**: send `false` only if your service is read-only. The service's owner can also change it on the registration website | **true** |
+| `open_task_ids` | On heartbeats: tasks you're still working on (see [Liveness](#liveness)). **Required in task mode** | omitted (bridge-only) |
 
 Every heartbeat may resend these fields. Main keeps the latest.
 
@@ -93,7 +91,7 @@ Every heartbeat may resend these fields. Main keeps the latest.
 
 ```
                 ┌──────────────────────────┐                ┌────────────────────────┐
-                │  main (developer_ws)     │                │  remote service        │
+                │  main (orchestrator)     │                │  remote service        │
                 └──────────────────────────┘                └────────────────────────┘
                               │                                         │
               (optional)      │   POST <MAIN_BASE>/developer/ping/{uid} │
@@ -124,7 +122,7 @@ A session has four phases: **handshake**, **audio**, **goodbye**, **close**.
 Audio cannot flow until the ack returns `accept:true`.
 
 Task mode uses the same handshake, then exchanges task messages instead of
-audio. See [Task mode](#task-mode--draft-v2).
+audio. See [Task mode](#task-mode-v2).
 
 ---
 
@@ -136,16 +134,17 @@ audio. See [Task mode](#task-mode--draft-v2).
 {
   "type": "hello",
   "user_id": "<uuid string identifying the end user>",
-  "version": "1"
+  "version": "2"
 }
 ```
 
+(v1 sent `"version": "1"`; a v2 main sends `"2"` plus the fields below.)
 Sent immediately after the WebSocket upgrades. Main expects an `ack` reply
 within `DEVELOPER_WS_BRIDGE_ACK_TIMEOUT_S` seconds (default 5). If the
 remote sends nothing in that window, main treats it as **no pickup**, closes
 the socket, and tells the end user "The remote service didn't pick up."
 
-#### DRAFT (v2): `hello` additions
+#### (v2) `hello` additions
 
 ```json
 {
@@ -154,7 +153,7 @@ the socket, and tells the end user "The remote service didn't pick up."
   "mode": "bridge",
   "user_id": "<end user id>",
   "session_id": "<id of this connection, for logs>",
-  "context_id": "<conversation thread id; see Identifiers>",
+  "contextId": "<conversation thread id; see Identifiers>",
   "task_id": "<present only when a task was escalated to a live call>"
 }
 ```
@@ -163,8 +162,14 @@ the socket, and tells the end user "The remote service didn't pick up."
 |---|---|---|
 | `mode` | `"bridge"` (absent in v1, which means bridge) | `"task"` |
 | `user_id` | The end user | Always `"orchestrator"`, because one task connection carries tasks for many users. Each `task.dispatch` carries its own `user_id` |
-| `context_id` | The user's thread with your service. It matches the `context_id` of their background tasks, so a live call can see what was asked before | Absent (sent per task message) |
+| `contextId` | The user's thread with your service. It matches the `contextId` of their background tasks, so a live call can see what was asked before | Absent (sent per task message) |
 | `task_id` | Present when main escalated a task to a live call ("Tabletop has a few questions, want me to put you through?"). Pick up where the task left off | Absent |
+
+If your registered URL contains `{user_id}`, main fills it with the end
+user's id for a live call and with `orchestrator` for the task connection
+(e.g. `wss://…/ws/{user_id}` → `wss://…/ws/orchestrator`), so a per-user URL
+can tell the two apart before reading `hello`. Kairos does this
+(`app/kairos_tasks.py`).
 
 If you receive a `mode` you don't support, reply `ack {accept:false}` and
 close with **4405**.
@@ -197,12 +202,12 @@ After sending a reject, close the WebSocket with close code **4403**
 accept, simply stay open and proceed to the audio phase (or, in task mode, the
 task-message phase).
 
-#### DRAFT (v2): `ack` additions
+#### (v2) `ack` additions
 
-A v2 ack repeats your capabilities for this connection. It may **narrow**
-what you registered (for example a lower `max_concurrency` while you're under
-load), but never add to it. Main uses your registration wherever the two
-differ upward.
+A v2 ack repeats your capabilities. **Main routes and sends using your
+registration** (it must know your capabilities before it can reach you); the
+ack must not contradict it. A task-mode ack that doesn't list `task` in
+`modes` makes main close the connection.
 
 ```json
 {
@@ -219,10 +224,10 @@ differ upward.
 
 | Field | Meaning | If absent |
 |---|---|---|
-| `modes` | Modes you accept on this URL. Must include the `mode` from the hello | Your registered `modes` (`["bridge"]` for v1) |
-| `max_concurrency` | Max tasks right now. Main uses the smaller of this and your registered value | Registered value |
-| `task_ops` | Task requests you handle on this connection | Registered value |
-| `events` | How you deliver task events. **`callback` is required for task mode** | Registered value |
+| `modes` | Modes you accept on this URL. Must include the `mode` from the hello | `["bridge"]` (v1) |
+| `max_concurrency` | Informational; main enforces your registered value | Registered value |
+| `task_ops` | Informational; main uses your registered value | Registered value |
+| `events` | Informational. **`callback` must be registered for task mode** | Registered value |
 
 Main's fallbacks when an op is missing:
 
@@ -233,8 +238,8 @@ Main's fallbacks when an op is missing:
 | `close`, `delivered` | Skips those notices. They are informational |
 | `callback` in `events` | Treats you as bridge-only. Task mode needs push delivery, because main never polls |
 
-**Version negotiation:** today there is only `version: "1"`. If your service
-returns a different version, main logs a warning but proceeds. Behave the
+**Version negotiation:** main sends `version: "2"` and accepts an ack with
+`"1"` or `"2"`. For any other version main logs a warning but proceeds. Behave the
 same way if you receive a hello with a different version. In v2, a v1 ack to a
 `mode:"bridge"` hello is fine: main reads it as `modes:["bridge"]`. A v1 ack to
 a `mode:"task"` hello is treated as "task not supported", and main closes the
@@ -301,7 +306,7 @@ Two payload shapes are accepted; choose whichever fits your service.
 - Side-effects: agent text bypasses the assistant's conversation history.
   Future LLM turns won't know what the agent said. If the user replies,
   the assistant has no record. Wire it back yourself if you need that.
-  **DRAFT (v2):** main records `say` text in the history, marked as quoted
+  **(v2)** main records `say` text in the history, marked as quoted
   agent output, so a follow-up like "change that booking" can be resolved.
   Agent text is never treated as an instruction to main.
 - You can freely mix `audio` and `say` frames in the same session.
@@ -310,7 +315,7 @@ Frames with unknown or missing `type` and no `audio`/`text` field are
 silently dropped on both sides — safe to add new fields without breaking
 older peers.
 
-### DRAFT (v2): handing off a task during a live call
+### (v2) Handing off a task during a live call
 
 If the call produces ongoing work ("I'll confirm the booking and let you
 know"), send a `task.created` request over the transport you're on (during a live
@@ -321,7 +326,7 @@ as a background task. Without it, the promise is lost when the call ends.
 {
   "type": "task.created",
   "msg_id": "a-19",
-  "context_id": "<from the hello>",
+  "contextId": "<from the hello>",
   "body": {
     "intent": "Confirm the Nopa booking for 7pm, 2 people",
     "slots": { "restaurant": "Nopa", "time": "19:00", "party_size": 2 },
@@ -331,10 +336,11 @@ as a background task. Without it, the promise is lost when the call ends.
 }
 ```
 
-Main replies `task.ack {task_id}` with a main-minted `task_id` (or
-`task.nack`). From then on it is an ordinary task: report on it with
-`task.event` (see [Events](#events-you--main)), including after the bridge
-closes.
+Main replies on the same socket with
+`task.ack {task_id, callback: {url, token}}`, carrying a main-minted
+`task_id` and the callback to push events to (or `task.nack`). From then on it
+is an ordinary task: report on it with `task.event` (see
+[Events](#events-you--main)), including after the bridge closes.
 
 ---
 
@@ -360,7 +366,7 @@ correct message (`"The remote service disconnected."`).
 If a peer disappears without sending `bye` (process killed, network drop),
 the other side logs an "abrupt" disconnect — still safe, just noisier.
 
-In task mode (DRAFT), `bye` ends the **connection only**. Tasks continue, and
+In task mode (v2), `bye` ends the **connection only**. Tasks continue, and
 main sends `bye` with `reason: "idle"` when it reaps an idle pooled
 connection.
 
@@ -373,17 +379,14 @@ connection.
 | `1000` | Normal closure (after a clean `bye` exchange) | either side |
 | `1002` | Protocol error (missing/malformed hello or ack, etc.) | either side |
 | `4403` | Call rejected (ack `accept:false`) | remote |
-| `4405` | **DRAFT (v2).** Mode not supported (e.g. `mode:"task"` to a bridge-only service) | remote |
+| `4405` | **(v2)** Mode not supported (e.g. `mode:"task"` to a bridge-only service) | remote |
 
 These are advisory — the logs on each side identify what happened with more
 detail than the close code alone.
 
 ---
 
-## Task mode — DRAFT (v2)
-
-> Not implemented by main yet. This section is the spec agents will build
-> against. Feedback welcome before it ships.
+## Task mode (v2)
 
 ### Model
 
@@ -403,10 +406,10 @@ task failure.
 main                                               your service
   │ connect + hello(task) ─────────────────────────────►│
   │◄──────────────────────────────── ack(task_ops, …)    │
-  │ task.dispatch {task_id:T, …} ──────────────────────►│  persist T, then:
-  │◄──────────────────────── task.ack {status:accepted}  │
+  │ task.dispatch {task_id:T, …} ──────────────────────►│  save T (best effort), then:
+  │◄──────────────────────── task.ack {status:submitted}  │
   │ (connection closed)                                  │  …work…
-  │◄──── POST /developer/tasks/T/events {seq:1, succeeded, result}
+  │◄──── POST /developer/tasks/T/events {seq:1, completed, result}
   │ 200 {ack_seq:1} ────────────────────────────────────►│
   │                                                      │
   │ … later: "move it to eight" …                        │
@@ -417,11 +420,18 @@ main                                               your service
 
 ### Identifiers
 
+Task states and field names follow **Google's Agent2Agent (A2A)** vocabulary,
+so A2A agents map onto this protocol one-to-one: `submitted`, `working`,
+`input-required`, `completed`, `canceled`, `failed`, and `contextId`. Only the
+names match A2A. The transport is still this WebSocket plus the HTTP callback,
+not A2A's JSON-RPC.
+
+
 | ID | Minted by | Meaning | Your obligations |
 |---|---|---|---|
 | `task_id` | **Main** (UUID) | The task, for its whole life | Key your stored task by it. A repeat `task.dispatch` with a `task_id` you already have must **not** create a second task (see [Idempotency](#idempotency)) |
 | `agent_task_ref` | You (optional) | Your internal job ID | Return it in the dispatch ack if you have one. Main echoes it back on every later message for that task |
-| `context_id` | Main | One user's conversation thread with your service. Several tasks, and live calls, can share it | Optional. Use it to keep conversational memory across follow-ups ("book dinner", then "and a taxi there") |
+| `contextId` | Main | One user's conversation thread with your service. Several tasks, and live calls, can share it | Optional. Use it to keep conversational memory across follow-ups ("book dinner", then "and a taxi there") |
 | `msg_id` | Sender | One message | Unique per sender. Use something short and random |
 | `reply_to` | Responder | The `msg_id` being answered | Required on every `task.ack`, `task.nack` and `task.event_ack` |
 | `seq` | You | Order of events for one task: 1, 2, 3, … | Increase by one per event per task. Persist it, and never reuse a number |
@@ -436,7 +446,7 @@ shape:
   "type": "task.dispatch",
   "msg_id": "m-7f3a",
   "task_id": "6a1e2c44-…",
-  "context_id": "c-2b90…",
+  "contextId": "c-2b90…",
   "agent_task_ref": null,
   "sent_at": "2026-10-05T19:02:11Z",
   "body": { }
@@ -457,7 +467,7 @@ transport. For `ws` that means any open task connection from main, not
 necessarily the one the request came on. `reply_to` does the matching:
 
 ```json
-{ "type": "task.ack",  "reply_to": "m-7f3a", "task_id": "6a1e…", "body": { "status": "accepted" } }
+{ "type": "task.ack",  "reply_to": "m-7f3a", "task_id": "6a1e…", "body": { "status": "submitted" } }
 { "type": "task.nack", "reply_to": "m-7f3a", "task_id": "6a1e…",
   "body": { "code": "missing_input", "fields": ["party_size"], "message": "How many people?", "retryable": false } }
 ```
@@ -472,7 +482,7 @@ that, ack first and report the outcome later as events.
   "type": "task.dispatch",
   "msg_id": "m-7f3a",
   "task_id": "6a1e…",
-  "context_id": "c-2b90…",
+  "contextId": "c-2b90…",
   "body": {
     "user_id": "4dd16650-…",
     "intent": "Book a table at Nopa for 2 at 7pm tonight",
@@ -505,15 +515,18 @@ that, ack first and report the outcome later as events.
   drop the task. See
   [Deadlines](#deadlines). Never treat the deadline as a reason to stop
   reporting: a result you finish late is still delivered.
-- `callback` is always present. Store the URL and token with the task. The
-  token is valid until 24 h after the task ends.
+- `callback` is always present. Store the URL and token with the task. A
+  re-sent dispatch (same `task_id`, e.g. after you nacked `missing_input`)
+  carries a fresh token: use the latest one.
 
-Ack body: `{"status": "accepted" | "running", "eta_s"?: number, "agent_task_ref"?: string}`.
+Ack body: `{"status": "submitted" | "working", "eta_s"?: number, "agent_task_ref"?: string}`.
 
-**You must persist the task (at least `task_id`, its status and next `seq`)
+**You should persist the task (at least `task_id`, its status and next `seq`)
 before acking**, so you can still deliver its events, and answer later
-requests about it, after you restart.
-Don't persist anything when you nack.
+requests about it, after you restart. This is **best effort**: a simple
+service may keep tasks in memory. If you lose a task, main finds out from your
+heartbeat's `open_task_ids` (see [Liveness](#liveness)) and tells the user it
+failed. Don't persist anything when you nack.
 
 #### `task.status`: report current state (optional)
 
@@ -523,7 +536,7 @@ about a task while you look dead (see [Liveness](#liveness)). Supporting it
 is optional. Body: `{}`. Ack body:
 
 ```json
-{ "status": "input_required", "question": "Which restaurant?", "question_seq": 3,
+{ "status": "input-required", "question": "Which restaurant?", "question_seq": 3,
   "progress": { "message": "Checking availability", "pct": 40 },
   "result": null, "last_seq": 3 }
 ```
@@ -543,9 +556,9 @@ Body: `{"changes": {"time": "20:00"}}`. Ack body: `{"status": "...",
 Body: `{"reason": "user_cancelled" | "deadline" | "escalated_to_bridge" |
 "accept_timeout"}`. Main never cancels tasks because it restarted: tasks are
 durable on both sides. Ack body: `{"status":
-"cancelled" | "cancelling" | "already_finished", "result"?: {...}}`.
+"canceled" | "canceling" | "already_finished", "result"?: {...}}`.
 
-- `cancelling` means you will send a terminal `cancelled` event when done.
+- `canceling` means you will send a terminal `canceled` event when done.
 - `already_finished` means it completed first. Include the `result`, because
   main still tells the user. This also covers finishing just after a
   deadline: main records the result and tells the user "finished after all".
@@ -555,8 +568,8 @@ durable on both sides. Ack body: `{"status":
 #### `task.input`: the user's answer to your question
 
 Body: `{"answer": "Nopa", "question_seq": 3}`, where `question_seq` is the `seq`
-of the `input_required` event being answered. Ack body: `{"status":
-"running"}`. Nack with `no_question_pending` if you weren't waiting for one.
+of the `input-required` event being answered. Ack body: `{"status":
+"working"}`. Nack with `no_question_pending` if you weren't waiting for one.
 
 #### `task.close`: the task is over from main's side
 
@@ -619,7 +632,7 @@ Report every state change as a `task.event`:
   "agent_task_ref": "bk-551",
   "seq": 4,
   "body": {
-    "status": "succeeded",
+    "status": "completed",
     "result": {
       "say": "Booked Nopa for 2 at 7pm. Confirmation 4471.",
       "output": { "confirmation": "4471" }
@@ -631,14 +644,17 @@ Report every state change as a `task.event`:
 
 | `status` | Required body fields | Main does |
 |---|---|---|
-| `running` | Optional `progress{message, pct}` | Records it. Progress is not spoken |
-| `input_required` | `question` (written to be spoken) | Asks the user. The answer comes back as `task.input` with `question_seq` = this event's `seq` |
-| `succeeded` | `result{say, output?}` | Tells the user per their notify setting |
+| `working` | Optional `progress{message, pct}` | Records it. Progress is not spoken |
+| `input-required` | `question` (written to be spoken) | Asks the user. The answer comes back as `task.input` with `question_seq` = this event's `seq` |
+| `completed` | `result{say, output?}` | Tells the user per their notify setting |
 | `failed` | `error` (written to be spoken) | Tells the user: "Tabletop couldn't complete that. <error>" |
-| `cancelled` | none | Records it. Speaks only if the user didn't cancel it themselves |
+| `canceled` | none | Records it. Speaks only if the user didn't cancel it themselves |
 
-- `succeeded`, `failed` and `cancelled` are **terminal**. Send nothing after
-  one, and main ignores anything that arrives later.
+- `completed`, `failed` and `canceled` are **terminal**. Send nothing after
+  one; main ignores later events, with one exception: a `completed` event
+  after main gave up on the task (its deadline passed with
+  `drop_at_deadline`, or it was cancelled) is still recorded, and the user
+  hears "{agent} finished after all". Work that happened wins.
 - `result.say` is spoken verbatim (≤ 2,000 characters, written for the ear).
   `result.output` is structured (≤ 256 KB).
 - `notify_hint` is `normal` or `urgent`. Main may use `urgent` to wake the
@@ -695,7 +711,7 @@ expect:
    normal. Only if the user said to drop the task at the deadline does main
    send `task.cancel {reason:"deadline"}` (reply as for any cancel, with
    `already_finished` and the `result` if you just finished).
-5. Waiting on the user (`input_required`) doesn't pause the deadline.
+5. Waiting on the user (`input-required`) doesn't pause the deadline.
 6. You may declare `default_deadline_s` when you register. Main applies it
    to dispatches where the user didn't state a deadline.
 
@@ -711,15 +727,17 @@ Main doesn't poll, and most tasks have no deadline, so main detects a dead servi
   their status, and tells the user if they ask (or proactively, once, per
   their notify setting). When your heartbeat resumes the flag clears, and
   your re-sent events catch the tasks up.
-- **Reconciliation (SHOULD).** Include the tasks you are still working on:
+- **Reconciliation (REQUIRED in task mode).** Every heartbeat must list the
+  tasks you are still working on. Persisting tasks is best effort, so this is
+  how main notices a task you lost:
 
   ```json
   { "service_id": "tabletop-3a7f", "public_url": "wss://…", "version": "2",
     "open_task_ids": ["6a1e…", "91c0…"] }
   ```
 
-  If main has a task open for you that isn't listed, **and** isn't covered by
-  an un-acked event you're still sending, main treats it as lost. It marks the
+  If main has a task open for you that isn't listed (and it was dispatched
+  more than `DISPATCH_RECONCILE_GRACE_S`, 120 s, ago), main treats it as lost. It marks the
   task `failed`, tells the user, and sends `task.close {reason:"agent_lost"}`.
   So send the terminal event *before* you drop a task from the list.
 - `/developer/unregister` (graceful shutdown) does **not** fail your open
@@ -749,7 +767,7 @@ Main doesn't poll, and most tasks have no deadline, so main detects a dead servi
 | Task duration | **No limit by default.** The task ends on your terminal event, or on the user's cancel, complete or delete. An optional `deadline_at` is enforced by main |
 | Event resend | Backoff 1 s → 5 min, for at least 24 h |
 | Heartbeat (task mode) | Every 5 min. Tasks are flagged stalled after 15 min without one |
-| Callback token validity | Until 24 h after the task ends |
+| Callback token validity | As long as main keeps the task |
 | Idle task connection | Closed by main after 60 s (`bye`, `reason:"idle"`) |
 
 ---
@@ -791,7 +809,7 @@ service must already be listening at `<REMOTE_BRIDGE_URL>` *before* it
 sends the ping.
 
 **Use a ping for "I need the user live now", not for results.** To report a
-finished task, send a `task.event` (DRAFT v2). Main then decides how to reach
+finished task, send a `task.event` (v2). Main then decides how to reach
 the user, which may mean waking their device if they asked to be told.
 
 ---
@@ -811,7 +829,7 @@ the user, which may mean waking their device if they asked to be told.
 6. Optionally: POST to `<MAIN_BASE>/developer/ping/{user_id}` to have main
    initiate a call to your service.
 
-**Task mode (DRAFT v2).** Additionally:
+**Task mode (v2).** Additionally:
 
 7. Declare your capabilities at registration (`binding`, `modes`,
    `task_ops`, `events` with `callback`, `max_concurrency`,
@@ -820,22 +838,24 @@ the user, which may mean waking their device if they asked to be told.
 8. Answer every task request with one `task.ack` or `task.nack` within your
    `max_reply_latency_s`, with `reply_to` set. Dedupe resent requests by
    `msg_id`.
-9. **Persist a task before acking its dispatch**, keyed by main's `task_id`.
+9. Persist a task before acking its dispatch, keyed by main's `task_id`
+   (best effort: recommended, not required).
 10. Treat a repeated `task.dispatch` for a known `task_id` as a no-op that
     returns the same ack.
 11. Nack with `missing_input {fields}` instead of guessing a missing value.
 12. **Push** every state change, above all completion, as a `task.event` with
     an increasing `seq` to the HTTP callback, and resend until acked. Main
     never polls.
-13. Heartbeat via `/developer/register` every 5 min, ideally with
+13. Heartbeat via `/developer/register` every 5 min, **with**
     `open_task_ids`.
 14. Handle `task.cancel` and `task.close`, even for tasks dispatched on an
     earlier connection.
 
-The reference implementation in
-[`testing/echo_server.py`](testing/echo_server.py) is ~150 lines and does
-all of the bridge-mode items, including the optional ping path. Use it as a
-starting point. It will gain task mode when main implements v2.
+Reference implementations: [`testing/echo_server.py`](testing/echo_server.py)
+(~150 lines) does all of the bridge-mode items, including the optional ping
+path; [`testing/task_agent.py`](testing/task_agent.py) does all of the task-mode
+items (ack/nack, idempotent dispatch, pushed events with resend, heartbeat
+with `open_task_ids`). Use them as starting points.
 
 ---
 
@@ -850,14 +870,16 @@ starting point. It will gain task mode when main implements v2.
 
 All read at process start via `python-dotenv` on `<repo>/.env`.
 
-**DRAFT (v2), planned:**
+**(v2):**
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `DISPATCH_DEFAULT_REPLY_LATENCY_S` | `5` | Reply wait for services that don't register `max_reply_latency_s` |
+| `DISPATCH_REPLY_LATENCY_S` | `5` | Reply wait for services that don't register `max_reply_latency_s` |
+| `DISPATCH_MAX_SENDS` | `3` | Sends of a `task.dispatch` before main gives up on it |
+| `DISPATCH_RETRY_BASE_S` | `5` | Resend backoff base (doubling, capped at 5 min) |
 | `DISPATCH_OUTBOX_SWEEP_S` | `30` | How often queued requests are retried |
-| `DISPATCH_OUTBOX_TTL_H` | `24` | How long non-dispatch requests stay queued |
-| `DISPATCH_DISPATCH_RESENDS` | `2` | Same-`task_id` resends before giving up |
+| `DISPATCH_OUTBOX_TTL_H` | `24` | How long requests stay queued |
 | `DISPATCH_STALL_AFTER_S` | `900` | Heartbeat silence before a service's open tasks are flagged stalled |
-| `DISPATCH_IDLE_CLOSE_S` | `60` | Idle task-connection reaping |
-| `DISPATCH_CALLBACK_TOKEN_TTL_H` | `24` | Callback token lifetime after the task ends |
+| `DISPATCH_IDLE_CLOSE_S` / `DISPATCH_MAX_CONNECTIONS` | `60` / `200` | Idle task-connection reaping / pool size |
+
+The full list is in `ORCHESTRATOR_V2_TOOL_CALLS.md` Appendix B.

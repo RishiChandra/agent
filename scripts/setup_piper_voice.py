@@ -1,7 +1,7 @@
 """Download the Piper TTS voice for local development.
 
 The voice file (~63 MB .onnx + ~5 KB .onnx.json) lives in ``piper_voices/`` at the
-repo root, matching the default in ``app/developer_ws/tts.py``. It's not committed
+repo root, matching the default in ``app/orchestrator/tts.py``. It's not committed
 to git — same pattern as ``vosk-model-small-en-us-0.15/`` — so a fresh checkout
 needs to fetch it once. Without the voice, Piper logs ``"piper voice unavailable;
 TTS disabled"`` at runtime and the assistant's TTS replies are silent.
@@ -28,7 +28,7 @@ from pathlib import Path
 # Layout on huggingface.co/rhasspy/piper-voices: en/en_US/<speaker>/<quality>/...
 HF_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
-# Default matches app/developer_ws/tts.py:_DEFAULT_MODEL.
+# Default matches app/orchestrator/tts.py:_DEFAULT_MODEL.
 DEFAULT_VOICE = "en_US-amy-medium"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

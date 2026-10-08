@@ -14,7 +14,8 @@ it. Infrastructure basics (VM, networks, secrets, build conventions) are in [OCI
     Piper TTS, 24 kHz). **This is the v3 default** and the path the device uses.
   - `/ws/{user_id}` — legacy bridge straight to Gemini Live. Kept for A/B.
 - **Static site** at `/` from `agent_directory/` (see [WEBSITE.md](WEBSITE.md)).
-- **Startup** runs `ensure_agents_table()` (idempotent) and preloads Vosk/Piper/Silero.
+- **Startup** preloads Vosk/Piper/Silero, warms the STT recognizer pool and the agent router, and starts the task service.
+  It never creates or alters tables: the schema comes from `deploy/migrate.sh` ([DATABASE.md](DATABASE.md#migrations)).
 
 Outbound dependencies: Google **Gemini** API (voice + text), host PostgreSQL, and — for reminders — the Mosquitto broker via
 the worker (see [SCHEDULER.md](SCHEDULER.md)). Azure OpenAI env vars exist in the code but nothing imports them; leave unset.
@@ -52,15 +53,17 @@ upgrades pass straight through. Hostnames come from `SITE_HOST_V4`/`SITE_HOST_V6
 
 ## Deploy / redeploy
 
-From the build directory on the VM, with the env vars set:
+From the build directory on the VM, with the env vars set. **Migrate first**, then deploy, then run any backfill:
 
 ```sh
 cd /home/ubuntu/releases/app-backend-step2-20260911
+deploy/migrate.sh ai_pin_db                           # schema (idempotent; DATABASE.md "Migrations")
 export APP_IMAGE=codex-app-backend:step4-94fa561471da \
        APP_ENV_FILE=/home/ubuntu/app-backend-config/backend.env \
        APP_MODELS_DIR=/home/ubuntu/app-backend-assets/models APP_BIND_PORT=18000
 docker compose -p app-backend -f docker-compose.oci.yml up -d          # recreates app + worker on $APP_IMAGE
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18000/healthz # expect 200
+docker compose -p app-backend -f docker-compose.oci.yml exec -T app python /app/deploy/app_backend/backfill_agent_routing.py
 ```
 
 Public check: `curl https://146-235-229-232.sslip.io/healthz`. Readiness (models + DB):
